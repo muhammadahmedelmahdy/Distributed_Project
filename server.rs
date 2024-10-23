@@ -1,6 +1,14 @@
 use tokio::net::UdpSocket;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use steganography::decoder::*;
+use steganography::util::file_as_dynamic_image;
+use std::fs::write;  // Use this to save the decoded image data
+
+// Custom function to save data to a file
+fn save_data(data: Vec<u8>, file_path: &str) -> std::io::Result<()> {
+    write(file_path, data)  // Save the data to the specified file
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Check for "START" signal
             if &buffer[..size] == b"START" {
                 // Create/truncate the file only when "START" signal is received
-                file = Some(File::create("received_image.png").await?);
+                file = Some(File::create("received_encoded_image.png").await?);
                 println!("Received start of transfer signal. File created.");
                 continue;
             }
@@ -37,6 +45,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        println!("Image transfer completed and saved as 'received_image.png'.");
+        println!("Image transfer completed and saved as 'received_encoded_image.png'.");
+
+        // Decode the hidden image after receiving the encoded image
+        let encoded_image_path = "received_encoded_image.png";
+        let encoded_image = file_as_dynamic_image(encoded_image_path.to_string());
+
+        // Convert DynamicImage to ImageBuffer<Rgba<u8>, Vec<u8>> for the decoder
+        let encoded_image_buffer = encoded_image.to_rgba();  // Use to_rgba instead of to_rgba8
+
+        // Initialize the decoder and extract the hidden data
+        let decoder = Decoder::new(encoded_image_buffer);
+        let hidden_image_bytes = decoder.decode_alpha();  // Assuming it was encoded with the alpha channel
+
+        // Save the extracted hidden image to a file
+        let hidden_image_path = "extracted_hidden_image.jpeg"; // The original hidden image
+        save_data(hidden_image_bytes, hidden_image_path)?;
+        println!("Hidden image extracted and saved as '{}'", hidden_image_path);
     }
 }
