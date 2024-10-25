@@ -1,135 +1,83 @@
 use tokio::net::UdpSocket;
 use tokio::fs::File;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use std::collections::{BTreeMap, HashSet};
+use tokio::io::AsyncWriteExt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::path::Path;
-use std::error::Error;
-use tokio::time::{timeout, Duration};
+use steganography::decoder::*;
+use steganography::util::file_as_dynamic_image;
+
+const CHUNK_SIZE: usize = 1024;
+const ACK: &[u8] = b"ACK";
+const SERVER_ADDR: &str = "172.18.0.1:8008";
+
+// Counter for received images to create unique file names
+static IMAGE_COUNTER: AtomicUsize = AtomicUsize::new(1);
+
+// Creates a new file to save incoming image chunks
+async fn create_image_file() -> tokio::io::Result<File> {
+    let image_num = IMAGE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let file_name = format!("received_image_{}.png", image_num);
+    println!("Server: Creating file {}", file_name);
+    File::create(file_name).await
+}
+
+// Receives a chunk from the client
+async fn receive_chunk(socket: &UdpSocket, buffer: &mut [u8]) -> tokio::io::Result<(usize, std::net::SocketAddr)> {
+    socket.recv_from(buffer).await
+}
+
+// Sends an ACK back to the client
+async fn send_ack(socket: &UdpSocket, src: std::net::SocketAddr, chunk_number: u32) -> tokio::io::Result<()> {
+    socket.send_to(ACK, src).await?;
+    println!("Server: Sent ACK for chunk {}", chunk_number);
+    Ok(())
+}
+
+// Writes a chunk to the file if it’s the expected chunk
+async fn write_chunk(
+    file: &Mutex<File>,
+    expected_chunk: &mut u32,
+    chunk_number: u32,
+    data: &[u8],
+) -> tokio::io::Result<bool> {
+    if chunk_number == *expected_chunk {
+        println!("Server: Writing chunk {} to file", chunk_number);
+        file.lock().unwrap().write_all(data).await?;
+        *expected_chunk += 1;
+        Ok(true)
+    } else {
+        println!("Server: Unexpected chunk number {}, expecting {}", chunk_number, *expected_chunk);
+        Ok(false)
+    }
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    let socket = initialize_socket("172.18.0.1:8080").await?;
-    let encoded_image_path = Path::new("received_encoded_image.png");
-    let mut file = initialize_file(encoded_image_path).await?;
-    let mut received_packets = BTreeMap::new();
+async fn main() -> tokio::io::Result<()> {
+    let socket = UdpSocket::bind(SERVER_ADDR).await?;
+    let mut buffer = [0u8; CHUNK_SIZE + 4];
 
-    // Track all packets received
-    let total_bytes_received = receive_data(&socket, &mut received_packets).await?;
-
-    // Identify missing packets if any and request them
-    if let Some(missing_packets) = identify_missing_packets(&received_packets) {
-        request_missing_packets(&socket, &missing_packets).await?;
-        receive_missing_data(&socket, &mut received_packets, &missing_packets).await?;
-    }
-
-    save_data(&mut file, received_packets).await?;
-    println!(
-        "Image transfer complete. Total bytes received: {}. File saved to {:?}",
-        total_bytes_received, encoded_image_path
-    );
-    Ok(())
-}
-
-async fn initialize_socket(address: &str) -> Result<UdpSocket, Box<dyn Error>> {
-    let socket = UdpSocket::bind(address).await?;
-    println!("Server listening on {}", address);
-    Ok(socket)
-}
-
-async fn initialize_file(path: &Path) -> Result<BufWriter<File>, Box<dyn Error>> {
-    let file = BufWriter::new(File::create(path).await?);
-    Ok(file)
-}
-
-async fn receive_data(socket: &UdpSocket, received_packets: &mut BTreeMap<u32, Vec<u8>>,) -> Result<usize, Box<dyn Error>> {
-    let mut buffer = [0u8; 1024];
-    let mut total_bytes_received = 0;
+    println!("Server: Ready to receive image chunks...");
 
     loop {
-        let (size, src) = socket.recv_from(&mut buffer).await?;
-        let message = &buffer[..size];
+        let file = Mutex::new(create_image_file().await?);
+        let mut expected_chunk = 0;
 
-        match message {
-            b"START" => {
-                println!("Received START signal from {:?}", src);
+        loop {
+            let (bytes_received, src) = receive_chunk(&socket, &mut buffer).await?;
+            println!("Server: Received packet from {:?}", src);
+
+            if bytes_received < 4 {
+                println!("Server: Packet too small to contain a chunk number");
+                continue;
             }
-            b"END" => {
-                println!("Received END signal from {:?}", src);
-                socket.send_to(b"END_ACK", src).await?;
-                break;
-            }
-            _ => {
-                let seq_number = extract_sequence_number(message);
-                received_packets.insert(seq_number, message[4..].to_vec());
-                total_bytes_received += size - 4;
-                println!("Received packet with sequence number: {}", seq_number);
+
+            let chunk_number = u32::from_be_bytes(buffer[0..4].try_into().unwrap());
+            let data = &buffer[4..bytes_received];
+
+            if write_chunk(&file, &mut expected_chunk, chunk_number, data).await? {
+                send_ack(&socket, src, chunk_number).await?;
             }
         }
     }
-
-    Ok(total_bytes_received)
-}
-
-// Extract missing sequence numbers
-fn identify_missing_packets(received_packets: &BTreeMap<u32, Vec<u8>>) -> Option<Vec<u32>> {
-    let mut missing = Vec::new();
-    let mut expected_seq = 0;
-
-    for seq in received_packets.keys() {
-        while expected_seq < *seq {
-            missing.push(expected_seq);
-            expected_seq += 1;
-        }
-        expected_seq += 1;
-    }
-    if !missing.is_empty() { Some(missing) } else { None }
-}
-
-// Request retransmission of missing packets
-async fn request_missing_packets(socket: &UdpSocket, missing_packets: &[u32]) -> Result<(), Box<dyn Error>> {
-    for &seq_number in missing_packets {
-        let mut message = vec![0u8; 4];
-        message[..4].copy_from_slice(&seq_number.to_be_bytes());
-        socket.send(&message).await?;
-        println!("Requested missing packet with sequence number: {}", seq_number);
-    }
-    Ok(())
-}
-
-// Receive missing packets based on server request
-async fn receive_missing_data(
-    socket: &UdpSocket,
-    received_packets: &mut BTreeMap<u32, Vec<u8>>,
-    missing_packets: &[u32]
-) -> Result<(), Box<dyn Error>> {
-    let mut buffer = [0u8; 1024];
-    let missing_set: HashSet<_> = missing_packets.iter().cloned().collect();
-
-    for _ in 0..missing_packets.len() {
-        let (size, _) = socket.recv_from(&mut buffer).await?;
-        let seq_number = extract_sequence_number(&buffer[..size]);
-
-        if missing_set.contains(&seq_number) {
-            received_packets.insert(seq_number, buffer[4..size].to_vec());
-            println!("Received missing packet with sequence number: {}", seq_number);
-        }
-    }
-    Ok(())
-}
-
-fn extract_sequence_number(message: &[u8]) -> u32 {
-    u32::from_be_bytes([message[0], message[1], message[2], message[3]])
-}
-
-async fn save_data(
-    file: &mut BufWriter<File>,
-    received_packets: BTreeMap<u32, Vec<u8>>,
-) -> Result<(), Box<dyn Error>> {
-    for (_seq, data) in received_packets {
-        file.write_all(&data).await?;
-    }
-
-    file.flush().await?;
-    file.shutdown().await?;
-    Ok(())
 }
