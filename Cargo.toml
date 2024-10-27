@@ -1,5 +1,5 @@
 [package]
-name = "test_chunking"
+name = "phase1"
 version = "0.1.0"
 edition = "2021"
 
@@ -13,7 +13,4 @@ hex = "0.4"
 image = "=0.24.9" 
 num = "*"
 rand = "*"
-
-[lib]
-name = "raft_lib"  
-path = "src/raft.rs"
+sysinfo = "0.23"
