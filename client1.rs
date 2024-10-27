@@ -52,9 +52,17 @@ async fn send_image(file_path: &str) -> tokio::io::Result<()> {
     let mut buffer = [0u8; CHUNK_SIZE];
     let mut chunk_number: u32 = 0;
 
+    // Calculate the total number of chunks
+    let metadata = tokio::fs::metadata(file_path).await?;
+    let total_chunks = (metadata.len() as f32 / CHUNK_SIZE as f32).ceil() as u32;
+
     // Choose one server for the entire image transfer
     let server_addr = SERVER_ADDRS.choose(&mut rand::thread_rng()).unwrap();
     println!("Client: Sending image to server {}", server_addr);
+
+    // Send the total chunk count as the first message
+    socket.send_to(&total_chunks.to_be_bytes(), server_addr).await?;
+    println!("Client: Sent total chunk count: {}", total_chunks);
 
     println!("Client: Sending image in chunks...");
 
@@ -73,9 +81,16 @@ async fn send_image(file_path: &str) -> tokio::io::Result<()> {
         }
     }
 
+    // Send the end-of-transfer signal after all chunks are sent
+    socket.send_to(b"END", server_addr).await?;
+    println!("Client: Sent end-of-transfer signal.");
+
     println!("Client: Image transfer complete!");
     Ok(())
 }
+
+
+
 
 #[tokio::main]
 async fn main() -> tokio::io::Result<()> {
@@ -97,5 +112,6 @@ async fn main() -> tokio::io::Result<()> {
 
     // Send the encoded image in chunks
     send_image(encoded_image_path).await
+    
 }
 

@@ -13,3 +13,7 @@ hex = "0.4"
 image = "=0.24.9" 
 num = "*"
 rand = "*"
+
+[lib]
+name = "raft_lib"  
+path = "src/raft.rs"
