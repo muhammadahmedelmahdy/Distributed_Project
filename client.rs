@@ -1,64 +1,139 @@
 use tokio::net::UdpSocket;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use std::path::Path;
-use steganography::encoder::*;
-use steganography::util::{file_as_dynamic_image, save_image_buffer};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::time::{timeout, Duration, sleep};
+use steganography::decoder::*;
+use steganography::util::file_as_dynamic_image;
+use std::error::Error;
+
+const SERVER_ADDRS: [&str; 3] = ["10.40.49.222:8080", "10.40.49.222:8081", "10.40.49.222:8082"];
+const CLIENT_ADDR: &str = "10.40.49.222:0";
+const CHUNK_SIZE: usize = 1024;
+const ACK: &[u8] = b"ACK";
+const MAX_RETRIES: usize = 5;
+const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+/// Verify and return the address of the leader server, if available.
+async fn verify_leader(socket: &UdpSocket) -> Option<String> {
+    for attempt in 0..MAX_RETRIES {
+        for &server_addr in &SERVER_ADDRS {
+            socket.send_to(b"REQUEST_LEADER", server_addr).await.ok()?;
+            let mut buffer = [0; 15];
+            if let Ok(Ok((bytes, addr))) = timeout(Duration::from_secs(2), socket.recv_from(&mut buffer)).await {
+                if &buffer[..bytes] == b"LEADER_CONFIRM" {
+                    println!("Client: Leader confirmed at {}", addr);
+                    return Some(addr.to_string());
+                }
+            }
+        }
+        println!("Client: Attempt {} - No leader found, retrying...", attempt + 1);
+        sleep(RETRY_DELAY).await;
+    }
+    println!("Client: Leader could not be verified after {} attempts.", MAX_RETRIES);
+    None
+}
+
+/// Wait for acknowledgment (ACK) for the specified chunk.
+async fn receive_ack(socket: &UdpSocket, chunk_number: u32) -> bool {
+    let mut ack_buf = [0; 3];
+    match timeout(Duration::from_secs(5), socket.recv_from(&mut ack_buf)).await {
+        Ok(Ok((_, _))) if &ack_buf == ACK => {
+            println!("Client: Received ACK for chunk {}", chunk_number);
+            true
+        }
+        _ => {
+            println!("Client: No ACK for chunk {}", chunk_number);
+            false
+        }
+    }
+}
+
+/// Encrypt and transfer an image to the leader server in chunks.
+async fn middleware_encrypt(socket: &UdpSocket) -> tokio::io::Result<()> {
+    if let Some(leader_addr) = verify_leader(socket).await {
+        let image_path = "original_image.jpg";
+        let mut file = File::open(image_path).await?;
+        let mut buffer = [0u8; CHUNK_SIZE];
+        let mut chunk_number: u32 = 0;
+
+        // Notify the server about the image transfer
+        socket.send_to(b"IMAGE_TRANSFER", &leader_addr).await?;
+        println!("Client: Starting image transfer to {}", leader_addr);
+
+        // Send the image in chunks
+        while let Ok(bytes_read) = file.read(&mut buffer).await {
+            if bytes_read == 0 { break; }
+
+            loop {
+                let packet = [&chunk_number.to_be_bytes(), &buffer[..bytes_read]].concat();
+                socket.send_to(&packet, &leader_addr).await?;
+                if receive_ack(socket, chunk_number).await { break; }
+                sleep(Duration::from_millis(100)).await;
+            }
+            chunk_number += 1;
+        }
+
+        socket.send_to(b"END", &leader_addr).await?;
+        println!("Client: Image transfer complete!");
+    }
+
+    Ok(())
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let socket = UdpSocket::bind("127.0.0.1:0").await?; // Bind to any available port for the client
-    let server_addr = "127.0.0.1:8080";
-    
-    // Paths to original and mask images
-    let original_image_path = Path::new("messi.jpg");
-    let mask_image_path = Path::new("mask.png");
+async fn main() -> Result<(), Box<dyn Error>> {
+    let socket = UdpSocket::bind(CLIENT_ADDR).await?;
+    middleware_encrypt(&socket).await?;
+    middleware_decrypt(&socket).await?;
+    Ok(())
+}
 
-    // Load the original and mask images
-    let original_image = file_as_dynamic_image(original_image_path.to_str().unwrap().to_string());
-    let mask_image = file_as_dynamic_image(mask_image_path.to_str().unwrap().to_string());
+/// Receive and decode an image from the server.
+async fn middleware_decrypt(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
+    receive_image(socket).await?;
+    decode_image("encoded_image_received.png").await?;
+    Ok(())
+}
 
-    // Convert the original image into bytes
-    let mut original_file = File::open(&original_image_path).await?;
-    let mut original_bytes = Vec::new();
-    original_file.read_to_end(&mut original_bytes).await?;
-    
-    // Encrypt the original image into the mask using steganography
-    let encoder = Encoder::new(&original_bytes, mask_image);
-    let encoded_image = encoder.encode_alpha();  // Embed using alpha channel
+/// Receive image data from the server in chunks and save it as a PNG file.
+async fn receive_image(socket: &UdpSocket) -> tokio::io::Result<()> {
+    let mut file = File::create("encoded_image_received.png").await?;
+    let mut buffer = [0u8; CHUNK_SIZE + 4]; // 4 extra bytes for chunk number
+    let mut expected_chunk_number: u32 = 0;
 
-    // Save the encoded image to a file
-    let encoded_image_path = "encoded_image.png";
-    save_image_buffer(encoded_image, encoded_image_path.to_string());
-
-    // Now send the encoded image to the server
-    let mut encoded_file = File::open(&encoded_image_path).await?;
-    println!("Opened encoded image: {:?}", encoded_image_path);
-
-    // Send "START" signal before sending the image
-    socket.send_to(b"START", server_addr).await?;
-    println!("Sent start of transfer signal.");
-    
-    let mut buffer = [0u8; 1024];
-    let mut total_bytes_sent = 0;
-
-    // Read and send the encoded image file in chunks
     loop {
-        let size = encoded_file.read(&mut buffer).await?;
+        let (bytes_received, addr) = socket.recv_from(&mut buffer).await?;
 
-        if size == 0 {
-            println!("Finished reading the image.");
+        if &buffer[..bytes_received] == b"END" {
+            println!("Client: Received end of transmission signal.");
             break;
         }
 
-        socket.send_to(&buffer[..size], server_addr).await?;
-        total_bytes_sent += size;
-        println!("Sent {} bytes", size);
+        let chunk_number = u32::from_be_bytes(buffer[..4].try_into().unwrap());
+
+        if chunk_number == expected_chunk_number {
+            file.write_all(&buffer[4..bytes_received]).await?;
+            expected_chunk_number += 1;
+
+            socket.send_to(ACK, addr).await?;
+            println!("Client: Acknowledged chunk {}", chunk_number);
+        } else {
+            println!("Client: Unexpected chunk number. Expected {}, but received {}.", expected_chunk_number, chunk_number);
+        }
     }
 
-    // Send "END" signal to tell the server that the image transfer is complete
-    socket.send_to(b"END", server_addr).await?;
-    println!("Sent end of transfer signal. Total bytes sent: {}", total_bytes_sent);
+    println!("Client: Image successfully received and saved as PNG.");
+    Ok(())
+}
 
+/// Decode the received image and save the decoded output.
+async fn decode_image(file_path: &str) -> Result<(), Box<dyn Error>> {
+    let encoded_image = file_as_dynamic_image(file_path.to_string()).to_rgba();
+    let decoder = Decoder::new(encoded_image);
+
+    let decoded_data = decoder.decode_alpha();
+    let output_path = "decoded_output.png";
+    std::fs::write(output_path, &decoded_data)?;
+    println!("Image decoded and saved to {}", output_path);
     Ok(())
 }
