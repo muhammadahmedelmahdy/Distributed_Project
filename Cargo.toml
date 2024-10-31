@@ -9,8 +9,24 @@ steganography = "1.0.2"
 aes = "0.7.5"
 block-modes = "0.8.1"
 hex = "0.4"
-# image = "*"
-image = "=0.24.9" 
+image = "=0.24.9"
 num = "*"
 rand = "*"
 sysinfo = "0.23"
+
+# Define executables for each file
+[[bin]]
+name = "client"
+path = "client.rs"
+
+[[bin]]
+name = "server1"
+path = "server1.rs"
+
+[[bin]]
+name = "server2"
+path = "server2.rs"
+
+[[bin]]
+name = "server3"
+path = "server3.rs"

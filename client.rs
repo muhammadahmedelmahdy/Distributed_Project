@@ -6,8 +6,8 @@ use steganography::decoder::*;
 use steganography::util::file_as_dynamic_image;
 use std::error::Error;
 
-const SERVER_ADDRS: [&str; 3] = ["172.18.0.1:8080", "172.18.0.1:8081", "172.18.0.1:8082"];
-const CLIENT_ADDR: &str = "172.18.0.1:0";
+const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
+const CLIENT_ADDR: &str = "127.0.0.1:0";
 const CHUNK_SIZE: usize = 1024;
 const ACK: &[u8] = b"ACK";
 const MAX_RETRIES: usize = 5;
