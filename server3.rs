@@ -8,7 +8,8 @@ use steganography::util::{file_as_dynamic_image, save_image_buffer};
 use steganography::encoder::*;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
+use rand::Rng;
+use tokio::time::sleep;
 const CHUNK_SIZE: usize = 1024;
 const ACK: &[u8] = b"ACK";
 
@@ -40,6 +41,15 @@ async fn leader_election(
     loop {
         let (len, addr) = socket.recv_from(&mut buffer).await?;
         let message = String::from_utf8_lossy(&buffer[..len]);
+        let random_number = rand::thread_rng().gen_range(0..=10);
+        
+        // Simulate failure if the random number is 5
+        if random_number == 5 {
+            println!("{}: Simulated failure occurred, skipping this election round.", own_address);
+            sleep(Duration::from_secs(10)).await;  // Adjust sleep duration as needed
+            continue;
+        }
+
 
         if message == "REQUEST_LEADER" {
             client_addr = Some(addr);
@@ -104,7 +114,6 @@ async fn leader_election(
             receive_image(Arc::clone(&socket), addr).await?;
             encode_received_image().await?; // Call encoding after receiving the image
             send_encoded_image(Arc::clone(&socket), addr).await?; // Send encoded image back to client
-
         }
     }
 }
@@ -144,7 +153,7 @@ async fn receive_image(socket: Arc<UdpSocket>, src: std::net::SocketAddr) -> tok
 
 async fn encode_received_image() -> tokio::io::Result<()> {
     let received_image_path = "received_image_1.jpg";
-    let mask_image_path = "mask.jpeg";
+    let mask_image_path = "mask.jpg";
     let encoded_image_path = "encrypted_image_1.png";
 
     let mask_image = file_as_dynamic_image(mask_image_path.to_string());
@@ -161,8 +170,6 @@ async fn encode_received_image() -> tokio::io::Result<()> {
 
     Ok(())
 }
-
-
 
 async fn send_encoded_image(socket: Arc<UdpSocket>, dest: std::net::SocketAddr) -> tokio::io::Result<()> {
     let encoded_image_path = "encrypted_image_1.png";
