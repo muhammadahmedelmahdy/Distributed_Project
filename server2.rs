@@ -1,244 +1,146 @@
 use sysinfo::{CpuExt, System, SystemExt};
 use tokio::net::UdpSocket;
-use tokio::time::{sleep, Duration, timeout};
+use tokio::time::{timeout, Duration};
 use std::error::Error;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::Arc;
 use std::collections::HashMap;
 use steganography::util::{file_as_dynamic_image, save_image_buffer};
 use steganography::encoder::*;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
+use rand::Rng;
+use tokio::time::sleep;
+use tokio::sync::Mutex;
 
 const CHUNK_SIZE: usize = 1024;
 const ACK: &[u8] = b"ACK";
-const FAILURE_MSG: &[u8] = b"FAILURE";
-const RECOVERY_MSG: &[u8] = b"RECOVERY";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let own_address = "127.0.0.1:8081";
-    let peer_addresses = vec!["127.0.0.1:8080".to_string(), "127.0.0.1:8082".to_string()];
+    let peer_addresses = vec!["127.0.0.1:8080", "127.0.0.1:8082"];
     let socket = Arc::new(UdpSocket::bind(own_address).await?);
-    let failure_mode = Arc::new(AtomicBool::new(false));
-    let processing_image = Arc::new(AtomicBool::new(false));
-    let active_peers = Arc::new(tokio::sync::Mutex::new(peer_addresses));
-
     println!("Server running at {}", own_address);
 
-    // Task for listening for failure notifications from peers
-    let socket_clone = Arc::clone(&socket);
-    let active_peers_clone = Arc::clone(&active_peers);
-    tokio::spawn(async move {
-        if let Err(e) = listen_for_failures(socket_clone, active_peers_clone).await {
-            eprintln!("Error in peer listener task: {:?}", e);
-        }
-    });
+    let election_socket = Arc::clone(&socket);
+    let request_socket = Arc::clone(&socket);
 
-    // Task for simulating failures
-    let socket_clone = Arc::clone(&socket);
-    let failure_mode_clone = Arc::clone(&failure_mode);
-    let active_peers_clone = Arc::clone(&active_peers);
-    let processing_image_clone = Arc::clone(&processing_image);
-    tokio::spawn(async move {
-        if let Err(e) = simulate_failures(socket_clone, failure_mode_clone, own_address.to_string(), active_peers_clone, processing_image_clone).await {
-            eprintln!("Error in failure simulation task: {:?}", e);
-        }
-    });
+    let cpu_data = Arc::new(Mutex::new(HashMap::new()));
+    let leader_count = Arc::new(Mutex::new(0u32));
+    let handling_request = Arc::new(Mutex::new(false));
 
-    // Task for handling requests
-    let socket_clone = Arc::clone(&socket);
-    let failure_mode_clone = Arc::clone(&failure_mode);
-    tokio::spawn(async move {
-        if let Err(e) = receive_requests(socket_clone, failure_mode_clone, Arc::clone(&processing_image)).await {
-            eprintln!("Error in request handling task: {:?}", e);
-        }
-    });
+    // Start tasks for heartbeat sending and client request handling
+    let election_task = tokio::spawn(heartbeat_task(
+        election_socket,
+        peer_addresses.clone(),
+        cpu_data.clone(),
+        leader_count.clone(),
+    ));
+    let client_task = tokio::spawn(client_request_handler(
+        request_socket,
+        cpu_data.clone(),
+        handling_request.clone(),
+        peer_addresses.clone(),
+    ));
 
-    // Task for leader election
-    let socket_clone = Arc::clone(&socket);
-    let failure_mode_clone = Arc::clone(&failure_mode);
-    tokio::spawn(async move {
-        if let Err(e) = leader_election(socket_clone, active_peers.clone(), failure_mode_clone).await {
-            eprintln!("Error in leader election task: {:?}", e);
-        }
-    });
-
-    loop {
-        // The server remains awake by sleeping in an infinite loop.
-        sleep(Duration::from_secs(60)).await;
-    }
+    tokio::try_join!(election_task, client_task)?;
 
     Ok(())
 }
 
-async fn listen_for_failures(socket: Arc<UdpSocket>, active_peers: Arc<tokio::sync::Mutex<Vec<String>>>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut buffer = [0; 1024];
-
-    loop {
-        let (len, addr) = socket.recv_from(&mut buffer).await?;
-        let message = &buffer[..len];
-
-        if message == FAILURE_MSG {
-            println!("Received FAILURE notification from {}", addr);
-
-            // Remove failed peer from active peers
-            let mut peers = active_peers.lock().await;
-            peers.retain(|peer| peer != &addr.to_string());
-        } else if message == RECOVERY_MSG {
-            println!("Received RECOVERY notification from {}", addr);
-
-            // Add recovered peer back to active peers
-            let mut peers = active_peers.lock().await;
-            if !peers.contains(&addr.to_string()) {
-                peers.push(addr.to_string());
-            }
-        }
-    }
-}
-
-async fn simulate_failures(
+// Task to send heartbeat messages periodically
+async fn heartbeat_task(
     socket: Arc<UdpSocket>,
-    failure_mode: Arc<AtomicBool>,
-    own_address: String,
-    active_peers: Arc<tokio::sync::Mutex<Vec<String>>>,
-    processing_image: Arc<AtomicBool>
+    peers: Vec<&str>,
+    cpu_data: Arc<Mutex<HashMap<String, (f32, u32)>>>,
+    leader_count: Arc<Mutex<u32>>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut rng = StdRng::from_entropy();
-
-    loop {
-        let failure_duration = rng.gen_range(2..5); // Shorter failure duration
-        let recovery_duration = rng.gen_range(15..30); // Longer recovery duration
-
-        // Wait until image processing is done before entering failure mode
-        while processing_image.load(Ordering::Relaxed) {
-            println!("Waiting for image processing to complete before entering failure mode...");
-            sleep(Duration::from_secs(1)).await;
-        }
-
-        // Notify peers of failure
-        for peer in active_peers.lock().await.iter() {
-            socket.send_to(FAILURE_MSG, peer).await?;
-        }
-        println!("{} entering failure mode for {} seconds...", own_address, failure_duration);
-        failure_mode.store(true, Ordering::Relaxed);
-
-        // Simulate failure duration
-        sleep(Duration::from_secs(failure_duration)).await;
-
-        // Notify peers of recovery
-        for peer in active_peers.lock().await.iter() {
-            socket.send_to(RECOVERY_MSG, peer).await?;
-        }
-        println!("{} exiting failure mode. Running normally for {} seconds...", own_address, recovery_duration);
-        failure_mode.store(false, Ordering::Relaxed);
-
-        // Simulate recovery duration
-        sleep(Duration::from_secs(recovery_duration)).await;
-    }
-}
-
-async fn receive_requests(socket: Arc<UdpSocket>, failure_mode: Arc<AtomicBool>, processing_image: Arc<AtomicBool>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut buffer = [0; 1024];
-
-    loop {
-        if failure_mode.load(Ordering::Relaxed) {
-            println!("Server is in failure mode; not accepting requests.");
-            sleep(Duration::from_secs(1)).await;
-            continue;
-        }
-
-        // Normal request handling
-        let (len, addr) = socket.recv_from(&mut buffer).await?;
-        let message = String::from_utf8_lossy(&buffer[..len]);
-
-        if message == "IMAGE_TRANSFER" {
-            println!("Received IMAGE_TRANSFER request from {}", addr);
-            processing_image.store(true, Ordering::Relaxed);
-
-            // Process image transfer
-            receive_image(Arc::clone(&socket), addr).await?;
-            encode_received_image().await?;
-            send_encoded_image(Arc::clone(&socket), addr).await?;
-
-            processing_image.store(false, Ordering::Relaxed);
-        }
-    }
-}
-
-async fn leader_election(socket: Arc<UdpSocket>, active_peers: Arc<tokio::sync::Mutex<Vec<String>>>, failure_mode: Arc<AtomicBool>) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let mut buffer = [0; 1024];
-    let mut cpu_data: HashMap<String, (f32, u32)> = HashMap::new();
     let own_address = socket.local_addr()?.to_string();
-    let mut leader_count: u32 = 0;
-
+    
     loop {
-        if failure_mode.load(Ordering::Relaxed) {
-            println!("Server in failure mode; not participating in leader election.");
-            sleep(Duration::from_secs(1)).await;
-            continue;
+        let mut sys = System::new_all();
+        sys.refresh_cpu();
+        let own_cpu_usage = sys.global_cpu_info().cpu_usage();
+
+        {
+            // Update own CPU data
+            let mut cpu_data = cpu_data.lock().await;
+            cpu_data.insert(own_address.clone(), (own_cpu_usage, *leader_count.lock().await));
         }
 
-        // Listen for incoming leader election requests
+        let heartbeat_message = format!("{},{},{}", own_address, own_cpu_usage, *leader_count.lock().await);
+        for &peer in &peers {
+            socket.send_to(heartbeat_message.as_bytes(), peer).await?;
+            println!("{} sent heartbeat to {}", own_address, peer);
+        }
+
+        // Send heartbeats every 10 seconds
+        sleep(Duration::from_secs(10)).await;
+    }
+}
+
+async fn client_request_handler(
+    socket: Arc<UdpSocket>,
+    cpu_data: Arc<Mutex<HashMap<String, (f32, u32)>>>,
+    handling_request: Arc<Mutex<bool>>,
+    peers: Vec<&str>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut buffer = [0; 1024];
+    let own_address = socket.local_addr()?.to_string();
+
+    loop {
         let (len, addr) = socket.recv_from(&mut buffer).await?;
         let message = String::from_utf8_lossy(&buffer[..len]);
 
-        if message == "REQUEST_LEADER" {
-            println!("{} received REQUEST_LEADER from client {}", own_address, addr);
-
-            let mut sys = System::new_all();
-            sys.refresh_cpu();
-            let own_cpu_usage = sys.global_cpu_info().cpu_usage();
-            println!("{} calculated CPU usage: {:.8}%", own_address, own_cpu_usage);
-
-            let broadcast_message = format!("{},{},{}", own_address, own_cpu_usage, leader_count);
-            for peer in active_peers.lock().await.iter() {
-                socket.send_to(broadcast_message.as_bytes(), peer).await?;
-                println!("{} sent CPU usage and leader count to {}", own_address, peer);
+        // Step 1: Check if the message is a heartbeat message
+        let parts: Vec<&str> = message.split(',').collect();
+        if parts.len() == 3 {
+            // Parse the heartbeat components: "<address>,<cpu_usage>,<leader_count>"
+            if let (Ok(cpu_usage), Ok(peer_leader_count)) = (parts[1].parse::<f32>(), parts[2].parse::<u32>()) {
+                let peer_address = parts[0].to_string();
+                
+                // Update the `cpu_data` map with the peer's CPU usage and leader count
+                let mut cpu_data = cpu_data.lock().await;
+                cpu_data.insert(peer_address.clone(), (cpu_usage, peer_leader_count));
+                
+                println!("Received heartbeat from {} with CPU usage: {:.2}% and leader count: {}", peer_address, cpu_usage, peer_leader_count);
+                continue; // Skip further processing for heartbeat messages
             }
+        }
 
-            cpu_data.insert(own_address.clone(), (own_cpu_usage, leader_count));
+        // Step 2: Process other types of messages
+        match message.as_ref() {
+            // Handle election trigger from client
+            "IMAGE_TRANSFER" => {
+                let mut handling = handling_request.lock().await;
+                if *handling {
+                    println!("{} is already handling a request, ignoring new request.", own_address);
+                    continue;
+                }
 
-            for _ in 0..active_peers.lock().await.len() {
-                if let Ok(Ok((len, peer_addr))) = timeout(Duration::from_secs(2), socket.recv_from(&mut buffer)).await {
-                    let received = String::from_utf8_lossy(&buffer[..len]);
-                    let parts: Vec<&str> = received.split(',').collect();
+                // Start election process based on the latest CPU usage data
+                let cpu_data = cpu_data.lock().await;
+                if let Some((leader_address, &(leader_cpu, _))) = cpu_data.iter().min_by(|a, b| a.1.0.partial_cmp(&b.1.0).unwrap()) {
+                    if &own_address == leader_address {
+                        println!("{} elected as leader with CPU usage: {:.2}%", own_address, leader_cpu);
+                        *handling = true; // Mark as handling the request
 
-                    if parts.len() == 3 {
-                        let peer_address = parts[0].to_string();
-                        if let (Ok(cpu_usage), Ok(peer_leader_count)) = (parts[1].parse::<f32>(), parts[2].parse::<u32>()) {
-                            cpu_data.insert(peer_address.clone(), (cpu_usage, peer_leader_count));
-                            println!("{} received CPU usage and leader count from {}: {:.8}% and {}", own_address, peer_address, cpu_usage, peer_leader_count);
-                        }
-                    } else {
-                        println!("{} received an invalid message from {}: {}", own_address, peer_addr, received);
+                        // Notify client that this server is the leader
+                        socket.send_to(format!("LEADER,{}", own_address).as_bytes(), addr).await?;
+                        println!("{} notified client as leader", own_address);
+
+                        // Handle the image transfer
+                        receive_image(Arc::clone(&socket), addr).await?;
+                        encode_received_image().await?;
+                        send_encoded_image(Arc::clone(&socket), addr).await?;
+
+                        // Reset handling state after completing the request
+                        *handling = false;
                     }
-                } else {
-                    println!("{}: Timeout waiting for response from peers", own_address);
-                    break;
                 }
             }
-
-            if let Some((leader_address, &(leader_cpu, _))) = cpu_data.iter().min_by(|a, b| {
-                match a.1.0.partial_cmp(&b.1.0).unwrap() {
-                    std::cmp::Ordering::Equal => match a.1.1.cmp(&b.1.1) {
-                        std::cmp::Ordering::Equal => a.0.cmp(&b.0),
-                        other => other,
-                    },
-                    other => other,
-                }
-            }) {
-                println!("{} elected {} as leader with CPU usage: {:.8}% and leader count: {}", own_address, leader_address, leader_cpu, cpu_data[leader_address].1);
-
-                if &own_address == leader_address {
-                    leader_count += 1;
-                    socket.send_to(format!("LEADER,{}", own_address).as_bytes(), addr).await?;
-                    println!("{} (leader) sent leader confirmation to client at {}", own_address, addr);
-                }
-            }
-
-            cpu_data.clear();
+            // Unknown or malformed requests
+            _ => println!("Received unknown request from {}: {}", addr, message),
         }
     }
 }
@@ -278,7 +180,7 @@ async fn receive_image(socket: Arc<UdpSocket>, src: std::net::SocketAddr) -> tok
 
 async fn encode_received_image() -> tokio::io::Result<()> {
     let received_image_path = "received_image_1.jpg";
-    let mask_image_path = "mask.jpeg";
+    let mask_image_path = "mask.jpg";
     let encoded_image_path = "encrypted_image_1.png";
 
     let mask_image = file_as_dynamic_image(mask_image_path.to_string());
@@ -328,7 +230,6 @@ async fn send_encoded_image(socket: Arc<UdpSocket>, dest: std::net::SocketAddr) 
         chunk_number += 1;
     }
 
-    // Send end-of-transfer signal
     socket.send_to(b"END", dest).await?;
     println!("Server: Encoded image transfer complete.");
 
