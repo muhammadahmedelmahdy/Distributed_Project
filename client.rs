@@ -1,10 +1,12 @@
 use tokio::net::UdpSocket;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Importing necessary traits
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::{timeout, Duration, sleep};
 use std::error::Error;
 use steganography::util::file_as_dynamic_image;
 use steganography::decoder::Decoder;
+use image::DynamicImage;
+use image::open;
 
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
 const CLIENT_ADDR: &str = "127.0.0.1:0";
@@ -14,52 +16,84 @@ const ACK: &[u8] = b"ACK";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Bind the client socket to an ephemeral port
     let socket = UdpSocket::bind(CLIENT_ADDR).await?;
-    let request_message = "REQUEST_LEADER";
 
+    // Step 1: Send "IMAGE_TRANSFER" request to initiate election
     for server in &SERVER_ADDRS {
-        // Send the CPU usage request to each server
-        socket.send_to(request_message.as_bytes(), server).await?;
-        println!("Sent CPU usage request to {}", server);
+        socket.send_to(b"IMAGE_TRANSFER", server).await?;
+        println!("Sent image transfer request to {}", server);
     }
 
-    // Wait to receive the leader address
-    let mut buffer = [0; 1024];
-    match timeout(TIMEOUT_DURATION, socket.recv_from(&mut buffer)).await {
-        Ok(Ok((len, addr))) => {
-            let response = String::from_utf8_lossy(&buffer[..len]);
-            if response.starts_with("LEADER,") {
-                let leader_address = &response[7..]; // Extracting the leader address
-                println!("Received leader address: {} from {}", leader_address, addr);
+    // Step 2: Wait for the elected leader's response
+    let elected_leader = wait_for_leader(&socket).await?;
+    println!("Elected leader is {}", elected_leader);
 
-                // Start the image transfer process
-                middleware_encrypt(&socket, leader_address).await?;
-                
-                // Receive the encrypted image back from the server
-                // receive_image(&socket).await?;
+    // Step 3: Send image data only to the elected leader
+    send_image_data(&socket, &elected_leader).await?;
 
-                // //decode the received image
-                // decode_image("encoded_image_received.png").await?;
-
-                middleware_decrypt(&socket).await?;
-
-
-            } else {
-                println!("Unexpected response: {}", response);
-            }
-        },
-        Ok(Err(e)) => {
-            println!("Failed to receive response: {}", e);
-        },
-        Err(_) => {
-            println!("Timeout waiting for leader response");
-        },
-    }
+    // Step 4: Receive the encrypted image from the elected leader
+    middleware_decrypt(&socket).await?;
 
     Ok(())
 }
 
+async fn wait_for_leader(socket: &UdpSocket) -> Result<String, Box<dyn Error>> {
+    let mut buffer = [0; 1024];
+    loop {
+        if let Ok((len, addr)) = timeout(TIMEOUT_DURATION, socket.recv_from(&mut buffer)).await? {
+            let response = String::from_utf8_lossy(&buffer[..len]);
+            if response.starts_with("LEADER,") {
+                let leader_address = response[7..].to_string();
+                println!("Received leader confirmation from {}", leader_address);
+                return Ok(leader_address);
+            }
+        }
+    }
+}
+
+async fn send_image_data(socket: &UdpSocket, leader_addr: &str) -> tokio::io::Result<()> {
+    let image_path = "original_image.jpg";
+    let mut file = File::open(image_path).await?;
+    let mut buffer = [0u8; CHUNK_SIZE];
+    let mut chunk_number: u32 = 0;
+
+    println!("Client: Sending image data to leader at {}", leader_addr);
+
+    // Send the image in chunks to the elected leader
+    while let Ok(bytes_read) = file.read(&mut buffer).await {
+        if bytes_read == 0 { break; }
+
+        let packet = [&chunk_number.to_be_bytes(), &buffer[..bytes_read]].concat();
+        loop {
+            socket.send_to(&packet, leader_addr).await?;
+            if receive_ack(socket).await { break; }
+            sleep(Duration::from_millis(100)).await;
+        }
+        chunk_number += 1;
+    }
+
+    socket.send_to(b"END", leader_addr).await?;
+    println!("Client: Image transfer complete!");
+
+    Ok(())
+}
+
+async fn receive_ack(socket: &UdpSocket) -> bool {
+    let mut buffer = [0; 1024];
+    match timeout(Duration::from_secs(2), socket.recv_from(&mut buffer)).await {
+        Ok(Ok((len, _))) => {
+            let response = String::from_utf8_lossy(&buffer[..len]);
+            response.trim() == "ACK"
+        },
+        _ => false,
+    }
+}
+
+async fn middleware_decrypt(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
+    receive_image(socket).await?;
+    decode_image("encoded_image_received.png").await?;
+    Ok(())
+}
 async fn middleware_encrypt(socket: &UdpSocket, leader_addr: &str) -> tokio::io::Result<()> {
     let image_path = "original_image.jpg"; // Path to the image file
     let mut file = File::open(image_path).await?;
@@ -88,18 +122,6 @@ async fn middleware_encrypt(socket: &UdpSocket, leader_addr: &str) -> tokio::io:
     println!("Client: Image transfer complete!");
 
     Ok(())
-}
-
-async fn receive_ack(socket: &UdpSocket) -> bool {
-    let mut buffer = [0; 1024];
-
-    match timeout(Duration::from_secs(2), socket.recv_from(&mut buffer)).await {
-        Ok(Ok((len, _))) => {
-            let response = String::from_utf8_lossy(&buffer[..len]);
-            return response.trim() == "ACK";
-        },
-        _ => false, // Timeout or error
-    }
 }
 
 /// Receive image data from the server in chunks and save it as a PNG file.
@@ -144,12 +166,5 @@ async fn decode_image(file_path: &str) -> Result<(), Box<dyn Error>> {
     let output_path = "decoded_output.png";
     std::fs::write(output_path, &decoded_data)?;
     println!("Image decoded and saved to {}", output_path);
-    Ok(())
-}
-
-/// Receive and decode an image from the server.
-async fn middleware_decrypt(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
-    receive_image(socket).await?;
-    decode_image("encoded_image_received.png").await?;
     Ok(())
 }
