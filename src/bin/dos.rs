@@ -7,10 +7,13 @@ use warp::{Filter, reply};
 use warp::ws::{WebSocket, Message};
 use tokio::sync::broadcast;
 use futures_util::{StreamExt, SinkExt};
-use image::{DynamicImage, ImageBuffer, GenericImageView, imageops::FilterType};
+use image::{DynamicImage, GenericImageView, Rgba, ImageBuffer, imageops::FilterType};
 use std::path::{Path, PathBuf};
+use imageproc::drawing::draw_text_mut;
+use rusttype::{Font, Scale};
+use lazy_static::lazy_static;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct Directory {
     clients: HashMap<String, Vec<ImageData>>,
 }
@@ -58,14 +61,36 @@ impl Directory {
 // Global Mutex to hold directory
 type SharedDirectory = Arc<Mutex<Directory>>;
 
-fn prepare_low_quality_image(image: &DynamicImage) -> DynamicImage {
-    let preview = image.resize_exact(100, 100, FilterType::Triangle);
-    DynamicImage::ImageRgba8(preview.to_rgba8())
+// Lazy static variable for font
+lazy_static! {
+    static ref FONT: Font<'static> = {
+        let font_data = include_bytes!("/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/Roboto-Bold.ttf"); // Replace with actual font path
+        Font::try_from_bytes(font_data as &[u8]).expect("Error loading font")
+    };
 }
+
+fn prepare_low_quality_image(image: &DynamicImage, id: u32, owner: &str) -> Result<DynamicImage, image::ImageError> {
+    // Resize the image to a smaller size
+    let mut preview = image.resize_exact(200, 200, FilterType::Triangle).to_rgba8();
+
+    // Draw overlay text
+    let id_text = format!("Photo ID: {}", id);
+    let owner_text = format!("Owner: {}", owner);
+    let text_color = Rgba([255, 255, 255, 255]); // White text
+    let scale = Scale { x: 17.0, y: 17.0 }; // Adjust text size
+
+    draw_text_mut(&mut preview, text_color, 5, 5, scale, &FONT, &id_text);
+    draw_text_mut(&mut preview, text_color, 5, 25, scale, &FONT, &owner_text);
+
+    Ok(DynamicImage::ImageRgba8(preview))
+}
+
+
 
 fn add_image(directory: &mut Directory, id: u32, owner: &str, image_path: &Path) -> Result<(), image::ImageError> {
     let image = image::open(image_path)?;
-    let processed_image = prepare_low_quality_image(&image);
+    let processed_image = prepare_low_quality_image(&image, id, owner)?; // Updated
+
     let image_data = ImageData {
         id,
         owner: owner.to_string(),
@@ -73,9 +98,15 @@ fn add_image(directory: &mut Directory, id: u32, owner: &str, image_path: &Path)
         image: Some(processed_image),
     };
 
-    directory.clients.entry(owner.to_string()).or_insert_with(Vec::new).push(image_data);
+    directory
+        .clients
+        .entry(owner.to_string())
+        .or_insert_with(Vec::new)
+        .push(image_data);
+
     Ok(())
 }
+
 
 fn delete_image(directory: &mut Directory, owner: &str, id: u32) {
     if let Some(images) = directory.clients.get_mut(owner) {
@@ -89,6 +120,17 @@ fn combine_images_horizontally(directory: &Directory) -> Result<DynamicImage, im
         .values()
         .flat_map(|v| v.iter().filter_map(|data| data.image.as_ref()))
         .collect();
+
+    if images.is_empty() {
+            // Try to load the placeholder image
+            match image::open("/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/NoImagePlaceholder.jpg") {
+                Ok(placeholder) => return Ok(placeholder),
+                Err(err) => {
+                    eprintln!("Failed to load placeholder image: {}", err);
+                    return Err(err);
+                }
+            }
+    }
 
     let total_width: u32 = images.iter().map(|img| img.width()).sum();
     let max_height: u32 = images.iter().map(|img| img.height()).max().unwrap_or(0);

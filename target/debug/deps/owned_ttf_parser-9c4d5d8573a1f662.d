@@ -1,0 +1,10 @@
+/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/target/debug/deps/libowned_ttf_parser-9c4d5d8573a1f662.rmeta: /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/lib.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/convert.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/owned.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/preparse.rs
+
+/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/target/debug/deps/libowned_ttf_parser-9c4d5d8573a1f662.rlib: /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/lib.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/convert.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/owned.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/preparse.rs
+
+/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/target/debug/deps/owned_ttf_parser-9c4d5d8573a1f662.d: /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/lib.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/convert.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/owned.rs /Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/preparse.rs
+
+/Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/lib.rs:
+/Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/convert.rs:
+/Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/owned.rs:
+/Users/ahmedgouda/.cargo/registry/src/index.crates.io-6f17d22bba15001f/owned_ttf_parser-0.15.2/src/preparse.rs:
