@@ -22,16 +22,26 @@ struct Directory {
 struct ImageData {
     id: u32,
     owner: String,
-    path: String, // Changed to String to make serialization easier
+    //path: String, // Changed to String to make serialization easier
     #[serde(skip)] // Skip DynamicImage in serialization
     #[serde(default = "default_dynamic_image")]
     image: Option<DynamicImage>, // Optional to simplify serialization
+    low_quality_base64: Option<String>, // Base64-encoded low-quality image
 }
 
 // Default function for DynamicImage
 fn default_dynamic_image() -> Option<DynamicImage> {
     None
 }
+
+fn dynamic_image_to_base64(image: &DynamicImage) -> String {
+    let mut buf = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageOutputFormat::Jpeg(30))
+        .unwrap(); // Adjust quality here
+    base64::encode(buf)
+}
+
 
 impl Directory {
     fn new() -> Self {
@@ -89,23 +99,21 @@ fn prepare_low_quality_image(image: &DynamicImage, id: u32, owner: &str) -> Resu
 
 fn add_image(directory: &mut Directory, id: u32, owner: &str, image_path: &Path) -> Result<(), image::ImageError> {
     let image = image::open(image_path)?;
-    let processed_image = prepare_low_quality_image(&image, id, owner)?; // Updated
+    let processed_image = prepare_low_quality_image(&image, id, owner)?;
+    let low_quality_base64 = dynamic_image_to_base64(&processed_image);
 
     let image_data = ImageData {
         id,
         owner: owner.to_string(),
-        path: image_path.to_string_lossy().to_string(),
+        //path: image_path.to_string_lossy().to_string(),
         image: Some(processed_image),
+        low_quality_base64: Some(low_quality_base64),
     };
 
-    directory
-        .clients
-        .entry(owner.to_string())
-        .or_insert_with(Vec::new)
-        .push(image_data);
-
+    directory.clients.entry(owner.to_string()).or_insert_with(Vec::new).push(image_data);
     Ok(())
 }
+
 
 
 fn delete_image(directory: &mut Directory, owner: &str, id: u32) {
@@ -114,24 +122,27 @@ fn delete_image(directory: &mut Directory, owner: &str, id: u32) {
     }
 }
 
-fn combine_images_horizontally(directory: &Directory) -> Result<DynamicImage, image::ImageError> {
-    let images: Vec<&DynamicImage> = directory
+fn combine_images_from_base64(directory: &Directory) -> Result<DynamicImage, image::ImageError> {
+    // Collect images from the directory
+    let images: Vec<DynamicImage> = directory
         .clients
         .values()
-        .flat_map(|v| v.iter().filter_map(|data| data.image.as_ref()))
+        .flat_map(|v| v.iter().filter_map(|data| {
+            data.low_quality_base64.as_ref().map(|b64| {
+                let decoded = base64::decode(b64).unwrap();
+                image::load_from_memory(&decoded).unwrap()
+            })
+        }))
         .collect();
 
     if images.is_empty() {
-            // Try to load the placeholder image
-            match image::open("/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/NoImagePlaceholder.jpg") {
-                Ok(placeholder) => return Ok(placeholder),
-                Err(err) => {
-                    eprintln!("Failed to load placeholder image: {}", err);
-                    return Err(err);
-                }
-            }
+        // If no images, load the placeholder image
+        let placeholder_path = "/Users/ahmedgouda/Desktop/distributedProject/Distributed_Project/NoImagePlaceholder.jpg";
+        let placeholder_image = image::open(placeholder_path)?;
+        return Ok(placeholder_image);
     }
 
+    // Combine images horizontally
     let total_width: u32 = images.iter().map(|img| img.width()).sum();
     let max_height: u32 = images.iter().map(|img| img.height()).max().unwrap_or(0);
 
@@ -149,6 +160,8 @@ fn combine_images_horizontally(directory: &Directory) -> Result<DynamicImage, im
 
     Ok(DynamicImage::ImageRgba8(new_img))
 }
+
+
 
 async fn handle_ws_connection(ws: WebSocket, mut rx: broadcast::Receiver<String>) {
     let (mut ws_tx, _ws_rx) = ws.split();
@@ -219,7 +232,7 @@ async fn main() {
             let dir = dir.lock().unwrap();
 
             // Generate the combined preview image
-            match combine_images_horizontally(&dir) {
+            match combine_images_from_base64(&dir) {
                 Ok(combined_image) => {
                     // Save the preview image
                     let preview_path = "preview.jpg";
