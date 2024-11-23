@@ -13,7 +13,7 @@ use serde_json::json;
 use image::{io::Reader as ImageReader, DynamicImage, ImageOutputFormat};
 use base64::encode;
 use std::io::Cursor;
-
+use std::net::{IpAddr, Ipv4Addr,  UdpSocket as StdUdpSocket};
 
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
 const CLIENT_ADDR: &str = "127.0.0.1:0";
@@ -41,16 +41,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // // Step 4: Receive the encrypted image from the elected leader
     // middleware_decrypt(&socket).await?;
 
-    // let dos_address = "http://localhost:3030";
-    // let client_id = "client1";
-    // let image_path = "image3.jpg";
+    // DoS base URL
+    let dos_address = "http://localhost:3030";
+    let client_ip = get_local_ip().await?; // Fetch the local IP address dynamically
+    println!("Client IP Address: {}", client_ip);
 
-    // println!("Uploading image '{}' for client '{}' to the DoS at {}", image_path, client_id, dos_address);
+    // Path to the image to be added
+    let image_path = "image3.jpg";
 
-    // match add_image_to_dos(dos_address, client_id, image_path).await {
-    //     Ok(response) => println!("Success: {}", response),
-    //     Err(e) => eprintln!("Failed to upload image: {}", e),
-    // }
+    // Add the image to the DoS using the dynamic client ID
+    println!(
+        "Uploading image '{}' for client '{}' to the DoS at {}",
+        image_path, client_ip, dos_address
+    );
+
+    match add_image_to_dos(dos_address, &client_ip.to_string(), image_path).await {
+        Ok(response) => println!("Success: {}", response),
+        Err(e) => eprintln!("Failed to upload image: {}", e),
+    }
     // let dos_address = "http://localhost:3030";
 
     // // Example client ID and image name to delete
@@ -69,19 +77,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //     Err(e) => eprintln!("Failed to delete image: {}", e),
     // }
 
-    // DoS base URL
-    let dos_address = "http://localhost:3030";
+    // // DoS base URL
+    // let dos_address = "http://localhost:3030";
 
-    // Client ID for which the composite image is being fetched
-    let client_id = "client1";
+    // // Client ID for which the composite image is being fetched
+    // let client_id = "client1";
 
-    // Output path for the composite image
-    let output_path = "composite_image.png";
+    // // Output path for the composite image
+    // let output_path = "composite_image.png";
 
-    // Fetch and save the composite image
-    if let Err(e) = fetch_composite_image(dos_address, client_id, output_path).await {
-        eprintln!("Error fetching composite image: {}", e);
-    }
+    // // Fetch and save the composite image
+    // if let Err(e) = fetch_composite_image(dos_address, client_id, output_path).await {
+    //     eprintln!("Error fetching composite image: {}", e);
+    // }
 
     
 
@@ -380,6 +388,20 @@ pub async fn fetch_composite_image(
         .into())
     }
 }
+
+
+
+/// Returns the local IP address of the client.
+///
+/// This function is now asynchronous to support `.await`.
+async fn get_local_ip() -> Result<IpAddr, Box<dyn Error>> {
+    // Use a UDP socket to determine the local IP address
+    let socket = StdUdpSocket::bind("0.0.0.0:0")?;
+    socket.connect("8.8.8.8:80")?; // Connect to a public DNS server to resolve the local address
+    let local_addr = socket.local_addr()?;
+    Ok(local_addr.ip())
+}
+
 
 
 /// Decode the received image and save the decoded output.
