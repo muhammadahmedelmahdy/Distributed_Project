@@ -44,8 +44,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let composite_image_path_by_client = "composite_by_client.png";
     let composite_image_path_all_clients = "composite_all_clients.png";
 
-    const LISTEN_PORT: u16 = 9001; // Listening port for client1
-    const TARGET_PORT: u16 = 9002; // Port for client2
+    const LISTEN_PORT: u16 = 9001; // Listening port for client2
+    const TARGET_PORT: u16 = 9002; // Port for client1
     const CLIENT_ID: &str = "client1";
 
     let incoming_requests = Arc::new(Mutex::new(Vec::new()));
@@ -64,7 +64,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("4. View Composite Image (All Clients)");
         println!("5. Request Image");
         println!("6. View Incoming Requests");
-        println!("7. Exit");
+        println!("7. Modify Access Rights");
+        println!("8. Exit");
         print!("Enter your choice: ");
         std::io::stdout().flush()?;
 
@@ -74,37 +75,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         match choice {
             "1" => {
-                print!("Enter your client ID: ");
-                std::io::stdout().flush()?;
-                let mut client_id = String::new();
-                std::io::stdin().read_line(&mut client_id)?;
-                let client_id = client_id.trim();
-
                 print!("Enter the path to the image: ");
                 std::io::stdout().flush()?;
                 let mut image_path = String::new();
                 std::io::stdin().read_line(&mut image_path)?;
                 let image_path = image_path.trim();
 
-                match add_image_to_dos(dos_address, client_id, image_path).await {
+                match add_image_to_dos(dos_address, CLIENT_ID, image_path).await {
                     Ok(response) => println!("Success: {}", response),
                     Err(e) => println!("Failed to upload image: {}", e),
                 }
             }
             "2" => {
-                print!("Enter your client ID: ");
-                std::io::stdout().flush()?;
-                let mut client_id = String::new();
-                std::io::stdin().read_line(&mut client_id)?;
-                let client_id = client_id.trim();
-
                 print!("Enter the name of the image to delete: ");
                 std::io::stdout().flush()?;
                 let mut image_name = String::new();
                 std::io::stdin().read_line(&mut image_name)?;
                 let image_name = image_name.trim();
 
-                match delete_image_from_dos(dos_address, client_id, image_name).await {
+                match delete_image_from_dos(dos_address, CLIENT_ID, image_name).await {
                     Ok(response) => println!("Image deleted successfully: {}", response),
                     Err(e) => println!("Failed to delete image: {}", e),
                 }
@@ -152,7 +141,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     permitted_views,
                 };
 
-                match send_request(TARGET_PORT, &request).await {
+                match send_request(TARGET_PORT, &request, dos_address).await {
                     Ok(_) => println!("Request sent for image {} with {} views", image_name, permitted_views),
                     Err(e) => println!("Failed to send request: {}", e),
                 }
@@ -232,6 +221,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             "7" => {
+                modify_access_rights(dos_address).await?;
+            }
+            "8" => {
                 println!("Exiting... Goodbye!");
                 break;
             }
@@ -245,6 +237,294 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
 }
+
+
+async fn modify_access_rights(dos_address: &str) -> Result<(), Box<dyn Error>> {
+    // Fetch the list of images owned by the client
+    let images = fetch_owned_images(dos_address, CLIENT_ID).await?;
+
+    if images.is_empty() {
+        println!("You do not own any images.");
+        return Ok(());
+    }
+
+    println!("Your Images:");
+    for (index, image) in images.iter().enumerate() {
+        println!("{}. {}", index + 1, image.name);
+    }
+
+    print!("Select an image to modify (enter the number): ");
+    std::io::stdout().flush()?;
+    let mut image_choice = String::new();
+    std::io::stdin().read_line(&mut image_choice)?;
+    let image_index: usize = image_choice.trim().parse().unwrap_or(0);
+
+    if image_index == 0 || image_index > images.len() {
+        println!("Invalid choice.");
+        return Ok(());
+    }
+
+    let selected_image = &images[image_index - 1];
+
+    // Fetch access details for the selected image
+    let access_details = fetch_image_access_details(dos_address, CLIENT_ID, &selected_image.name).await?;
+
+    println!("Access Details for '{}':", selected_image.name);
+    for (index, (client_name, permitted_views)) in access_details.iter().enumerate() {
+        let views = permitted_views.map_or("Unlimited".to_string(), |v| v.to_string());
+        println!("{}. Client: {}, Permitted Views: {}", index + 1, client_name, views);
+    }
+
+    // Provide options to modify access
+    println!("\nOptions:");
+    println!("1. Change permitted views for a client");
+    println!("2. Revoke access for a client");
+    println!("3. Grant access to a new client");
+    print!("Enter your choice: ");
+    std::io::stdout().flush()?;
+
+    let mut modify_choice = String::new();
+    std::io::stdin().read_line(&mut modify_choice)?;
+    let modify_choice = modify_choice.trim();
+
+    match modify_choice {
+        "1" => {
+            // Change permitted views for a client
+            change_permitted_views(
+                dos_address,
+                CLIENT_ID,
+                &selected_image.name,
+                &access_details,
+            )
+            .await?;
+        }
+        "2" => {
+            // Revoke access for a client
+            revoke_access(
+                dos_address,
+                CLIENT_ID,
+                &selected_image.name,
+                &access_details,
+            )
+            .await?;
+        }
+        "3" => {
+            // Grant access to a new client
+            grant_access(
+                dos_address,
+                CLIENT_ID,
+                &selected_image.name,
+            )
+            .await?;
+        }
+        _ => {
+            println!("Invalid choice.");
+        }
+    }
+
+    Ok(())
+}
+
+
+#[derive(Deserialize)]
+struct ImageMetadata {
+    name: String,
+    // Include other fields if necessary
+}
+
+async fn fetch_owned_images(
+    dos_address: &str,
+    client_id: &str,
+) -> Result<Vec<ImageMetadata>, Box<dyn Error>> {
+    let client = Client::new();
+    let response = client
+        .get(format!("{}/list_images?client_id={}", dos_address, client_id))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let images = response.json::<Vec<ImageMetadata>>().await?;
+        Ok(images)
+    } else {
+        Err("Failed to fetch images.".into())
+    }
+}
+
+async fn fetch_image_access_details(
+    dos_address: &str,
+    owner: &str,
+    image_name: &str,
+) -> Result<Vec<(String, Option<i32>)>, Box<dyn Error>> {
+    let client = Client::new();
+    let response = client
+        .get(format!(
+            "{}/get_image_access?owner={}&image_name={}",
+            dos_address, owner, image_name
+        ))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let access_list = response.json::<Vec<(String, Option<i32>)>>().await?;
+        Ok(access_list)
+    } else {
+        Err("Failed to fetch access details.".into())
+    }
+}
+
+async fn change_permitted_views(
+    dos_address: &str,
+    owner: &str,
+    image_name: &str,
+    access_details: &Vec<(String, Option<i32>)>,
+) -> Result<(), Box<dyn Error>> {
+    println!("Select a client to modify:");
+    for (index, (client_name, permitted_views)) in access_details.iter().enumerate() {
+        let views = permitted_views.map_or("Unlimited".to_string(), |v| v.to_string());
+        println!("{}. Client: {}, Permitted Views: {}", index + 1, client_name, views);
+    }
+    print!("Enter the number of the client: ");
+    std::io::stdout().flush()?;
+    let mut client_choice = String::new();
+    std::io::stdin().read_line(&mut client_choice)?;
+    let client_index: usize = client_choice.trim().parse().unwrap_or(0);
+
+    if client_index == 0 || client_index > access_details.len() {
+        println!("Invalid choice.");
+        return Ok(());
+    }
+
+    let (client_name, _) = &access_details[client_index - 1];
+
+    print!("Enter the new number of permitted views (or -1 for unlimited): ");
+    std::io::stdout().flush()?;
+let mut views_input = String::new();
+std::io::stdin().read_line(&mut views_input)?;
+let permitted_views: i32 = views_input.trim().parse().unwrap_or(-1);
+
+// Default to 0 if input is invalid (negative value)
+let permitted_views_final = if permitted_views < 0 { 0 } else { permitted_views };
+
+// Send update to DoS
+let result = update_image_access(
+    dos_address,
+    owner,
+    image_name,
+    client_name,
+    permitted_views_final, // Pass as plain i32
+)
+.await;
+
+
+    match result {
+        Ok(_) => println!("Permitted views updated successfully."),
+        Err(e) => println!("Failed to update permitted views: {}", e),
+    }
+
+    Ok(())
+}
+
+async fn revoke_access(
+    dos_address: &str,
+    owner: &str,
+    image_name: &str,
+    access_details: &Vec<(String, Option<i32>)>,
+) -> Result<(), Box<dyn Error>> {
+    println!("Select a client to revoke access:");
+    for (index, (client_name, _)) in access_details.iter().enumerate() {
+        println!("{}. Client: {}", index + 1, client_name);
+    }
+    print!("Enter the number of the client: ");
+    std::io::stdout().flush()?;
+    let mut client_choice = String::new();
+    std::io::stdin().read_line(&mut client_choice)?;
+    let client_index: usize = client_choice.trim().parse().unwrap_or(0);
+
+    if client_index == 0 || client_index > access_details.len() {
+        println!("Invalid choice.");
+        return Ok(());
+    }
+
+    let client_name = &access_details[client_index - 1].0;
+
+    // Send revoke request to DoS
+    let result = revoke_image_access(
+        dos_address,
+        owner,
+        image_name,
+        client_name,
+    )
+    .await;
+
+    match result {
+        Ok(_) => println!("Access revoked successfully."),
+        Err(e) => println!("Failed to revoke access: {}", e),
+    }
+
+    Ok(())
+}
+
+async fn grant_access(
+    dos_address: &str,
+    owner: &str,
+    image_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    print!("Enter the client ID to grant access: ");
+    std::io::stdout().flush()?;
+    let mut client_name = String::new();
+    std::io::stdin().read_line(&mut client_name)?;
+    let client_name = client_name.trim();
+
+    print!("Enter the number of permitted views: ");
+    std::io::stdout().flush()?;
+    let mut views_input = String::new();
+    std::io::stdin().read_line(&mut views_input)?;
+    let permitted_views: i32 = views_input.trim().parse().unwrap_or(0);
+    
+    // Send update to DoS
+    let result = update_image_access(
+        dos_address,
+        owner,
+        image_name,
+        client_name,
+        permitted_views,
+    ).await;
+
+    match result {
+        Ok(_) => println!("Access granted successfully."),
+        Err(e) => println!("Failed to grant access: {}", e),
+    }
+
+    Ok(())
+}
+
+async fn revoke_image_access(
+    dos_address: &str,
+    owner: &str,
+    image_name: &str,
+    client_name: &str,
+) -> Result<(), Box<dyn Error>> {
+    let client = reqwest::Client::new();
+    let payload = json!({
+        "owner": owner,
+        "image_name": image_name,
+        "client_name": client_name,
+    });
+
+    let response = client
+        .post(format!("{}/revoke_access", dos_address))
+        .json(&payload)
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        let error_text = response.text().await.unwrap_or_default();
+        Err(format!("Failed to revoke access: {}", error_text).into())
+    }
+}
+
 
 async fn update_image_access(
     dos_address: &str,
@@ -270,9 +550,11 @@ async fn update_image_access(
     if response.status().is_success() {
         Ok(())
     } else {
-        Err("Failed to update access".into())
+        let error_text = response.text().await.unwrap_or_default();
+        Err(format!("Failed to update access: {}", error_text).into())
     }
 }
+
 
 
 async fn notify_requester(
@@ -325,7 +607,14 @@ async fn start_listener(port: u16, incoming_requests: Arc<Mutex<Vec<ImageRequest
 
 
 
-async fn send_request(target_port: u16, request: &ImageRequest) -> Result<(), Box<dyn Error>> {
+async fn send_request(target_port: u16, request: &ImageRequest, dos_address: &str) -> Result<(), Box<dyn Error>> {
+    // Ensure the image exists in the directory and the requester is not the owner
+    if let Err(e) = validate_request(&request.requested_image_name, &request.from_client_id, dos_address).await {
+        println!("Request validation failed: {}", e);
+        return Err(e);
+    }
+
+    // Proceed with sending the request
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", target_port)).await?;
     let data = serde_json::to_vec(request)?;
     stream.write_all(&data).await?;
@@ -335,6 +624,35 @@ async fn send_request(target_port: u16, request: &ImageRequest) -> Result<(), Bo
     );
     Ok(())
 }
+
+async fn validate_request(
+    image_name: &str,
+    client_id: &str,
+    dos_address: &str,
+) -> Result<(), Box<dyn Error>> {
+    // Create HTTP client
+    let client = Client::new();
+
+    // Query the directory for the image
+    let response = client
+        .get(format!(
+            "{}/validate_image_request?image_name={}&client_id={}",
+            dos_address, image_name, client_id
+        ))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        // If validation is successful, proceed
+        Ok(())
+    } else {
+        // Handle failure, retrieve the error message from the response
+        let error_message = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        Err(format!("Validation failed: {}", error_message).into())
+    }
+}
+
+
 
 async fn wait_for_leader(socket: &UdpSocket) -> Result<String, Box<dyn Error>> {
     let mut buffer = [0; 1024];

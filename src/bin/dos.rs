@@ -53,26 +53,31 @@ impl Directory {
 
     fn update_access(&mut self, owner: &str, image_name: &str, client_name: &str, permitted_views: Option<i32>) -> bool {
         if let Some(images) = self.clients.get_mut(owner) {
-            println!("DEBUG: Found owner '{}'", owner);
             if let Some(image) = images.iter_mut().find(|img| img.name == image_name) {
-                println!("DEBUG: Found image '{}'", image_name);
-                if !image.access.iter().any(|(name, _)| name == client_name) {
-                    println!(
-                        "DEBUG: Granting access to '{}' with permitted_views={:?}",
-                        client_name, permitted_views
-                    );
-                    image.access.push((client_name.to_string(), permitted_views));
-                    return true; // Successfully updated access
+                // Check if client already has access
+                if let Some(access_entry) = image.access.iter_mut().find(|(name, _)| name == client_name) {
+                    // Update permitted views
+                    access_entry.1 = permitted_views;
+                    return true;
                 } else {
-                    println!("DEBUG: Client '{}' already has access", client_name);
+                    // Add new access entry
+                    image.access.push((client_name.to_string(), permitted_views));
+                    return true;
                 }
-            } else {
-                println!("ERROR: Image '{}' not found for owner '{}'", image_name, owner);
             }
-        } else {
-            println!("ERROR: Owner '{}' not found", owner);
         }
-        false // Failed to update access
+        false
+    }
+
+    fn revoke_access(&mut self, owner: &str, image_name: &str, client_name: &str) -> bool {
+        if let Some(images) = self.clients.get_mut(owner) {
+            if let Some(image) = images.iter_mut().find(|img| img.name == image_name) {
+                // Remove access entry
+                image.access.retain(|(name, _)| name != client_name);
+                return true;
+            }
+        }
+        false
     }
     
     
@@ -215,64 +220,102 @@ async fn main() {
                 "error": format!("Image {} not found for client {}", image_name, client_id)
             }))
         });
+
+        let list_images = warp::path("list_images")
+            .and(warp::get())
+            .and(warp::query::<HashMap<String, String>>())
+            .and(with_directory(directory.clone()))
+            .map(|query: HashMap<String, String>, dir: SharedDirectory| {
+                let client_id = query.get("client_id").unwrap();
+                let dir = dir.lock().unwrap();
+
+                let images = dir.clients.get(client_id).cloned().unwrap_or_default();
+                warp::reply::json(&images)
+            });
+        
+        let get_image_access = warp::path("get_image_access")
+            .and(warp::get())
+            .and(warp::query::<HashMap<String, String>>())
+            .and(with_directory(directory.clone()))
+            .map(|query: HashMap<String, String>, dir: SharedDirectory| {
+                let owner = query.get("owner").unwrap();
+                let image_name = query.get("image_name").unwrap();
+                let dir = dir.lock().unwrap();
+        
+                if let Some(images) = dir.clients.get(owner) {
+                    if let Some(image) = images.iter().find(|img| img.name == *image_name) {
+                        warp::reply::json(&image.access)
+                    } else {
+                        warp::reply::json(&json!({
+                            "status": "failed",
+                            "error": "Image not found."
+                        }))
+                    }
+                } else {
+                    warp::reply::json(&json!({
+                        "status": "failed",
+                        "error": "Owner not found."
+                    }))
+                }
+            });
+        
     
     
         let update_access = warp::path("update_access")
-        .and(warp::post())
-        .and(warp::body::json())
-        .and(with_directory(directory.clone()))
-        .map(|body: HashMap<String, serde_json::Value>, dir: SharedDirectory| {
-            println!("Received update_access request: {:?}", body); // Debug log
-    
-            let owner = body.get("owner").unwrap().as_str().unwrap();
-            let image_name = body.get("image_name").unwrap().as_str().unwrap();
-            let client_name = body.get("client_name").unwrap().as_str().unwrap();
-            let permitted_views = body.get("permitted_views").unwrap().as_i64().unwrap() as i32;
-    
-            println!("Parsed payload - Owner: {}, Image: {}, Client: {}, Views: {}", owner, image_name, client_name, permitted_views);
-    
-            let mut dir = dir.lock().unwrap();
-    
-            if dir.update_access(owner, image_name, client_name, Some(permitted_views)) {
-                println!("Access updated successfully.");
-                dir.save_to_file("directory.json");
-                warp::reply::json(&json!({"status": "success"}))
-            } else {
-                println!("Failed to update access.");
-                warp::reply::json(&json!({"status": "failed"}))
-            }
-        });
-    
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(with_directory(directory.clone()))
+            .map(|body: HashMap<String, serde_json::Value>, dir: SharedDirectory| {
+                let owner = body.get("owner").and_then(|v| v.as_str()).unwrap();
+                let image_name = body.get("image_name").and_then(|v| v.as_str()).unwrap();
+                let client_name = body.get("client_name").and_then(|v| v.as_str()).unwrap();
+                let permitted_views = body.get("permitted_views").and_then(|v| v.as_i64()).map(|v| v as i32);
+        
+                let mut dir = dir.lock().unwrap();
+        
+                if dir.update_access(owner, image_name, client_name, permitted_views) {
+                    dir.save_to_file("directory.json");
+                    warp::reply::json(&json!({"status": "success"}))
+                } else {
+                    warp::reply::json(&json!({"status": "failed"}))
+                }
+            });
+        
+        let revoke_access = warp::path("revoke_access")
+            .and(warp::post())
+            .and(warp::body::json())
+            .and(with_directory(directory.clone()))
+            .map(|body: HashMap<String, serde_json::Value>, dir: SharedDirectory| {
+                let owner = body.get("owner").and_then(|v| v.as_str()).unwrap();
+                let image_name = body.get("image_name").and_then(|v| v.as_str()).unwrap();
+                let client_name = body.get("client_name").and_then(|v| v.as_str()).unwrap();
+
+                let mut dir = dir.lock().unwrap();
+
+                if dir.revoke_access(owner, image_name, client_name) {
+                    dir.save_to_file("directory.json");
+                    warp::reply::json(&json!({"status": "success"}))
+                } else {
+                    warp::reply::json(&json!({"status": "failed"}))
+                }
+            });
+
     
     
 
-    let list_by_client = warp::path("list_by_client")
+        let list_by_client = warp::path("list_by_client")
         .and(warp::get())
         .and(warp::query::<HashMap<String, String>>())
         .and(with_directory(directory.clone()))
         .map(|query: HashMap<String, String>, dir: SharedDirectory| {
-            let default_client_id = String::from("");
-            let client_id = query.get("client_id").unwrap_or(&default_client_id);
-
-            eprintln!("DEBUG: Fetching images for client '{}'", client_id); // Log the client_id
-
+            let client_id = query.get("client_id").map(String::as_str).unwrap_or("");
             let dir = dir.lock().unwrap();
-
-            // Retrieve images for the specified client_id
-            let images = match dir.clients.get(client_id) {
-                Some(images) if !images.is_empty() => images.clone(),
-                _ => {
-                    eprintln!("ERROR: No images found for client '{}'", client_id); // Log error
-                    return warp::http::Response::builder()
-                        .status(404)
-                        .header("Content-Type", "text/plain")
-                        .body(format!("No images found for client '{}'", client_id).into_bytes())
-                        .unwrap();
-                }
-            };
-
+    
+            // Fetch images for the given client
+            let images = dir.clients.get(client_id).cloned().unwrap_or_else(Vec::new);
+    
             eprintln!("DEBUG: Found {} images for client '{}'", images.len(), client_id);
-
+    
             match create_composite_image(&images) {
                 Ok(composite_image) => {
                     let mut buffer = Cursor::new(Vec::new());
@@ -280,23 +323,21 @@ async fn main() {
                         .write_to(&mut buffer, ImageOutputFormat::Png)
                         .is_err()
                     {
-                        eprintln!("ERROR: Failed to encode composite image for client '{}'", client_id);
+                        eprintln!("ERROR: Failed to encode composite image.");
                         return warp::http::Response::builder()
                             .status(500)
                             .header("Content-Type", "text/plain")
                             .body("Failed to encode composite image".to_string().into_bytes())
                             .unwrap();
                     }
-
-                    eprintln!("DEBUG: Successfully created composite image for client '{}'", client_id);
-
+    
                     warp::http::Response::builder()
                         .header("Content-Type", "image/png")
                         .body(buffer.into_inner())
                         .unwrap()
                 }
                 Err(e) => {
-                    eprintln!("ERROR: Failed to create composite image for client '{}': {}", client_id, e);
+                    eprintln!("ERROR: Failed to create composite image: {}", e);
                     warp::http::Response::builder()
                         .status(500)
                         .header("Content-Type", "text/plain")
@@ -305,6 +346,43 @@ async fn main() {
                 }
             }
         });
+
+        let validate_image_request = warp::path("validate_image_request")
+    .and(warp::get())
+    .and(warp::query::<HashMap<String, String>>())
+    .and(with_directory(directory.clone()))
+    .map(|query: HashMap<String, String>, dir: SharedDirectory| {
+        let image_name = query.get("image_name").map(String::as_str).unwrap_or("");
+        let client_id = query.get("client_id").map(String::as_str).unwrap_or("");
+
+        let dir = dir.lock().unwrap();
+
+        // Check if the image exists and ensure the requester is not the owner
+        if let Some((owner, _)) = dir.clients.iter().find(|(_, images)| {
+            images.iter().any(|image| image.name == image_name)
+        }) {
+            if owner == client_id {
+                return warp::http::Response::builder()
+                    .status(400)
+                    .header("Content-Type", "text/plain")
+                    .body("Request denied: You are the owner of this image.".to_string().into_bytes())
+                    .unwrap();
+            }
+            warp::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/plain")
+                .body("Validation successful".to_string().into_bytes())
+                .unwrap()
+        } else {
+            warp::http::Response::builder()
+                .status(404)
+                .header("Content-Type", "text/plain")
+                .body("Image not found.".to_string().into_bytes())
+                .unwrap()
+        }
+    });
+
+        
 
 
     let list_all_clients = warp::path("list_all_clients")
@@ -356,10 +434,14 @@ async fn main() {
 
     
         let routes = add_image
-        .or(update_access)
-        .or(list_all_clients)
-        .or(list_by_client)
-        .or(delete_image);
+            .or(update_access)
+            .or(list_all_clients)
+            .or(list_by_client)
+            .or(delete_image)
+            .or(list_images)
+            .or(get_image_access)
+            .or(validate_image_request)
+            .or(revoke_access);
     
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
