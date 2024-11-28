@@ -66,18 +66,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("Timeout waiting for leader response");
         },
     }
-    // DoS base URL
+    // Step 1: Register a client
     let dos_address = "http://localhost:3030";
+    let client_id = "mahdiistheking";
+    let password = "securepassword";
 
-    // Client ID for which the composite image is being fetched
-    let client_id = "client123";
+    match register_client(dos_address, client_id, password).await {
+        Ok(response) => println!("Client registered successfully: {}", response),
+        Err(e) => eprintln!("Error registering client: {}", e),
+    }
 
-    // Output path for the composite image
+    // Step 2: Update the client's IP address
+    if let Ok(local_ip) = get_local_ip().await {
+        match update_client_ip(dos_address, client_id, &local_ip.to_string()).await {
+            Ok(response) => println!("Client IP updated successfully: {}", response),
+            Err(e) => eprintln!("Error updating client IP: {}", e),
+        }
+    }
+
+    // Step 3: Add an image to the directory
+    let image_path = "image2.jpg";
+    match add_image_to_dos(dos_address, client_id, password, image_path).await {
+        Ok(response) => println!("Image added successfully: {}", response),
+        Err(e) => eprintln!("Error adding image: {}", e),
+    }
+
+    // Step 4: Fetch composite image for the client
     let output_path = "composite_image.png";
+    match fetch_composite_image(dos_address, client_id, output_path).await {
+        Ok(_) => println!("Composite image fetched and saved to {}", output_path),
+        Err(e) => eprintln!("Error fetching composite image: {}", e),
+    }
 
-    // Fetch and save the composite image
-    if let Err(e) = fetch_composite_image(dos_address, client_id, output_path).await {
-        eprintln!("Error fetching composite image: {}", e);
+    // Step 5: Delete the image from the directory
+    let image_name = image_path; // Same name as added image
+    match delete_image_from_dos(dos_address, client_id, password, image_name).await {
+        Ok(response) => println!("Image deleted successfully: {}", response),
+        Err(e) => eprintln!("Error deleting image: {}", e),
+    }
+    let output_path = "composite_image2.png";
+    // Step 6: Fetch composite image again to verify deletion
+    match fetch_composite_image(dos_address, client_id, output_path).await {
+        Ok(_) => println!("Composite image updated and saved to {}", output_path),
+        Err(e) => eprintln!("Error fetching composite image after deletion: {}", e),
     }
 
     Ok(())
