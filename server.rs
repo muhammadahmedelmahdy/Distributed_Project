@@ -218,7 +218,8 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     let clients_file_path = "clients.json";
     let directory: SharedDirectory = Arc::new(Mutex::new(Directory::load_from_file(file_path)));
     let client_directory: SharedClientDirectory = Arc::new(Mutex::new(ClientDirectory::load_from_file(clients_file_path)));
-    
+    //  Directory::new().save_to_file("directory.json");
+    // ClientDirectory::new().save_to_file("clients.json");
 
     let (notifier_tx, _) = broadcast::channel(100);
 

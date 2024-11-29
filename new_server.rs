@@ -218,7 +218,8 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     let clients_file_path = "clients.json";
     let directory: SharedDirectory = Arc::new(Mutex::new(Directory::load_from_file(file_path)));
     let client_directory: SharedClientDirectory = Arc::new(Mutex::new(ClientDirectory::load_from_file(clients_file_path)));
-    
+    // Directory::new().save_to_file("directory.json");
+    // ClientDirectory::new().save_to_file("clients.json");
 
     let (notifier_tx, _) = broadcast::channel(100);
 
@@ -374,36 +375,45 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
             }
         });
         // Register a new client
-    let register_client = warp::path("register_client")
-    .and(warp::post())
-    .and(warp::body::json())
-    .and(with_client_directory(client_directory.clone()))
-    .map(|body: HashMap<String, String>, client_dir: SharedClientDirectory| {
-        let client_id = body.get("id").unwrap().to_string();
-        let password = body.get("password").unwrap().to_string();
+        let register_client = warp::path("register_client")
+        .and(warp::post())
+        .and(warp::body::json())
+        .and(with_client_directory(client_directory.clone()))
+        .and(with_directory(directory.clone())) // Include the directory for updating
+        .map(
+            |body: HashMap<String, String>, client_dir: SharedClientDirectory, dir: SharedDirectory| {
+                let client_id = body.get("id").unwrap().to_string();
+                let password = body.get("password").unwrap().to_string();
 
-        let mut dir = client_dir.lock().unwrap();
+                let mut client_dir = client_dir.lock().unwrap();
+                let mut dir = dir.lock().unwrap(); // Lock directory for modification
 
-        if dir.clients.contains_key(&client_id) {
-            return warp::reply::json(&json!({
-                "error": "Client ID already exists"
-            }));
-        }
+                // Check if client already exists
+                if client_dir.clients.contains_key(&client_id) {
+                    return warp::reply::json(&json!({
+                        "error": "Client ID already exists"
+                    }));
+                }
 
-        let client_info = ClientInfo {
-            id: client_id.clone(),
-            password,
-            current_ip: None,
-        };
+                // Add the client to clients.json
+                let client_info = ClientInfo {
+                    id: client_id.clone(),
+                    password,
+                    current_ip: None,
+                };
+                client_dir.clients.insert(client_id.clone(), client_info);
+                client_dir.save_to_file("clients.json");
 
-        dir.clients.insert(client_id.clone(), client_info);
-        dir.save_to_file("clients.json");
+                // Add the client to directory.json
+                dir.clients.entry(client_id.clone()).or_insert_with(Vec::new);
+                dir.save_to_file("directory.json");
 
-        warp::reply::json(&json!({
-            "message": "Client registered successfully",
-            "client_id": client_id
-        }))
-    });
+                warp::reply::json(&json!({
+                    "message": "Client registered successfully",
+                    "client_id": client_id
+                }))
+            },
+        );
 
 // Update client's current IP
 let update_ip = warp::path("update_ip")

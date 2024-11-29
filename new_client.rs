@@ -88,21 +88,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("DOS Address determined: {}", dos_address);
     
         // // Use the dos_address for further actions
-        // let client_id = "mahdiistheking";
-        // let password = "securepassword";
-        // let image_path = "image2.jpg";
-    
-        // match add_image_to_dos(&dos_address, client_id, password, image_path).await {
-        //     Ok(response) => println!("Image added successfully: {}", response),
-        //     Err(e) => eprintln!("Error adding image: {}", e),
-        // }
         let client_id = "sisi";
-    let password = "sisira2esy";
+        let password = "sisira2esy";
+        let image_path = "image2.jpg";
+    
+        match add_image_to_dos(&dos_address, client_id, password, image_path).await {
+            Ok(response) => println!("Image added successfully: {}", response),
+            Err(e) => eprintln!("Error adding image: {}", e),
+        }
+    //     let client_id = "sisi";
+    // let password = "sisira2esy";
 
-    match register_client(&dos_address, client_id, password).await {
-        Ok(response) => println!("Client registered successfully: {}", response),
-        Err(e) => eprintln!("Error registering client: {}", e),
-    }
+    // match register_client(&dos_address, client_id, password).await {
+    //     Ok(response) => println!("Client registered successfully: {}", response),
+    //     Err(e) => eprintln!("Error registering client: {}", e),
+    // }
     } else {
         eprintln!("DOS port was not determined. Exiting...");
     }
