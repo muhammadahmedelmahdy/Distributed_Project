@@ -87,15 +87,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let dos_address = format!("http://localhost:{}", port);
         println!("DOS Address determined: {}", dos_address);
     
-        // Use the dos_address for further actions
-        let client_id = "mahdiistheking";
-        let password = "securepassword";
-        let image_path = "image2.jpg";
+        // // Use the dos_address for further actions
+        // let client_id = "mahdiistheking";
+        // let password = "securepassword";
+        // let image_path = "image2.jpg";
     
-        match add_image_to_dos(&dos_address, client_id, password, image_path).await {
-            Ok(response) => println!("Image added successfully: {}", response),
-            Err(e) => eprintln!("Error adding image: {}", e),
-        }
+        // match add_image_to_dos(&dos_address, client_id, password, image_path).await {
+        //     Ok(response) => println!("Image added successfully: {}", response),
+        //     Err(e) => eprintln!("Error adding image: {}", e),
+        // }
+        let client_id = "sisi";
+    let password = "sisira2esy";
+
+    match register_client(&dos_address, client_id, password).await {
+        Ok(response) => println!("Client registered successfully: {}", response),
+        Err(e) => eprintln!("Error registering client: {}", e),
+    }
     } else {
         eprintln!("DOS port was not determined. Exiting...");
     }
@@ -103,13 +110,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // println!("{}",leader_address);
     // println!("Client: Starting the registration process...");
     //  let dos_address = "http://localhost:3030";
-    // let client_id = "mahdiistheking";
-    // let password = "securepassword";
-
-    // match register_client(dos_address, client_id, password).await {
-    //     Ok(response) => println!("Client registered successfully: {}", response),
-    //     Err(e) => eprintln!("Error registering client: {}", e),
-    // }
+    
 
     // // Step 2: Update the client's IP address
     // if let Ok(local_ip) = get_local_ip().await {
