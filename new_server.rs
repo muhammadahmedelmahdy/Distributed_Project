@@ -170,8 +170,8 @@ fn create_composite_image(images: &[String]) -> Result<DynamicImage, Box<dyn std
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let own_address = "127.0.0.1:8081";
-    let peer_addresses = vec!["127.0.0.1:8080", "127.0.0.1:8082"];
+    let own_address = "127.0.0.1:8080";
+    let peer_addresses = vec!["127.0.0.1:8081", "127.0.0.1:8082"];
     let socket = Arc::new(UdpSocket::bind(own_address).await?);
 
     // Load shared directory and client directory
@@ -184,7 +184,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let server_task = tokio::spawn(leader_election(socket_clone, peer_addresses));
 
     // Synchronization Socket
-    let sync_socket = Arc::new(UdpSocket::bind("127.0.0.1:5002").await?); // Ensure this port is available
+    let sync_socket = Arc::new(UdpSocket::bind("127.0.0.1:5001").await?); // Ensure this port is available
 
     // Initialize the chunk buffer for synchronization
     let chunk_buffer: ChunkBuffer = Arc::new(new_Mutex::new(HashMap::new())); // Use tokio::sync::Mutex
@@ -193,12 +193,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // DOS Server Task
     let ip = [127, 0, 0, 1];
-    let port = 8084;
+    let port = 8083;
     let dos_task = run_dos(ip, port).await;
 
     // // Periodic Synchronization Task for JSONs
     // let jsons_task = tokio::spawn(periodic_synchronize(
-    //     vec!["127.0.0.1:8080", "127.0.0.1:8082"], // List of peers
+    //     vec!["127.0.0.1:8081", "127.0.0.1:8082"], // List of peers
     //     Arc::clone(&socket),                     // Shared socket
     //     Arc::clone(&directory),                  // Shared directory
     //     Arc::clone(&client_directory),           // Shared client directory
