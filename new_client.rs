@@ -14,7 +14,8 @@ use image::{io::Reader as ImageReader, DynamicImage, ImageOutputFormat};
 use base64::encode;
 use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr,  UdpSocket as StdUdpSocket};
-
+use std::io::{self, Write};
+use std::collections::HashMap;
 
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
 const CLIENT_ADDR: &str = "127.0.0.1:0";
@@ -24,142 +25,294 @@ const ACK: &[u8] = b"ACK";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Bind the client socket to an ephemeral port
     let socket = UdpSocket::bind(CLIENT_ADDR).await?;
+
+    // Request leader from servers
+    let leader_address = request_leader(&socket).await?;
+
+
+    println!("Welcome! Choose an option:");
+    println!("1: Register");
+    println!("2: Login");
+
+    let mut option = String::new();
+    std::io::stdin().read_line(&mut option).expect("Failed to read line");
+
+    match option.trim() {
+        "1" => register_client_to_dos(&leader_address).await?,
+        "2" => login(&leader_address).await?,
+        _ => println!("Invalid option!"),
+    }
+
+    loop {
+        println!("Choose an option:");
+        println!("1: Add an image");
+        println!("2: Delete an image");
+        println!("3: View the gallery");
+        println!("4: Exit");
+
+        option.clear(); // Clear the previous input
+        std::io::stdin().read_line(&mut option).expect("Failed to read line");
+
+        match option.trim() {
+            "1" => add_image().await?,
+            "2" => delete_image().await?,
+            "3" => view_gallery().await?,
+            "4" => break,
+            _ => println!("Invalid choice! Please select again."),
+        }
+    }
+
+    Ok(())
+}
+
+async fn login(leader_address: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Determine DOS port based on leader address
+    let leader_port: u16 = leader_address.split(':')
+        .nth(1) // Get the port part of the address
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+
+    let dos_port = match leader_port {
+        8080 => Some(8083),
+        8081 => Some(8084),
+        8082 => Some(8085),
+        _ => {
+            eprintln!("Unknown leader port: {}", leader_port);
+            None
+        }
+    };
+
+    if let Some(port) = dos_port {
+        let client = Client::new();
+        let dos_address = format!("http://localhost:{}", port);
+    
+    
+    let login_endpoint = format!("{}/login", dos_address);
+
+    // Get client_id and password from the user
+    let mut client_id = String::new();
+    print!("Enter client ID: ");
+    std::io::stdout().flush()?; // Ensure prompt is visible
+    std::io::stdin().read_line(&mut client_id)?;
+    let client_id = client_id.trim(); // Remove newline
+
+    let mut password = String::new();
+    print!("Enter password: ");
+    std::io::stdout().flush()?; // Ensure prompt is visible
+    std::io::stdin().read_line(&mut password)?;
+    let password = password.trim(); // Remove newline
+
+    // Prepare the request payload
+    let mut payload = HashMap::new();
+    payload.insert("client_id", client_id);
+    payload.insert("password", password);
+
+    // Send the POST request
+    let response = client.post(&login_endpoint)
+        .json(&payload)
+        .send()
+        .await?;
+
+    // Extract the status before consuming the body
+    let status = response.status();
+    let response_text = response.text().await?;
+
+    // Print the status and raw response for debugging
+    println!("Response Status: {}", status);
+    println!("Raw Response: {}", response_text);
+
+    // Provide messages based on response status code
+    match status.as_u16() {
+        200 => {
+            if let Ok(response_body) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                if let Some(message) = response_body.get("message") {
+                    println!("{}", message);
+                } else {
+                    println!("Login successful, but no message received.");
+                }
+            } else {
+                println!("Login successful, but response could not be parsed.");
+            }
+        }
+        401 => {
+            println!("Login failed: Invalid password. Please try again.");
+        }
+        404 => {
+            println!("Login failed: Client ID not found. Please check your input.");
+        }
+        500 => {
+            println!("Server error: Something went wrong on the server. Please try again later.");
+        }
+        _ => {
+            println!(
+                "Unexpected response: {}. Please contact support if the issue persists.",
+                status
+            );
+        }
+    }}
+    else {
+        return Err("DOS port was not determined. Exiting...".into());
+    }
+
+    Ok(())
+}
+
+
+
+
+async fn add_image() -> Result<(), Box<dyn Error>> {
+    println!("Add an image logic here");
+    // Implement logic to add an image
+    Ok(())
+}
+
+async fn delete_image() -> Result<(), Box<dyn Error>> {
+    println!("Delete an image logic here");
+    // Implement logic to delete an image
+    Ok(())
+}
+
+async fn view_gallery() -> Result<(), Box<dyn Error>> {
+    println!("Gallery viewing logic here");
+
+    loop {
+        println!("Choose an option:");
+        println!("1: Send a request");
+        println!("2: Return to main menu");
+
+        let mut gallery_choice = String::new();
+        io::stdin().read_line(&mut gallery_choice).expect("Failed to read line");
+
+        match gallery_choice.trim() {
+            "1" => {
+                println!("Send request logic here");
+                // Implement logic to send a request
+            },
+            "2" => break,
+            _ => println!("Invalid choice! Please select again."),
+        }
+    }
+
+    Ok(())
+}
+
+
+async fn register_client_to_dos(leader_address: &str) -> Result<(), Box<dyn Error>> {
+    // Determine DOS port based on leader address
+    let leader_port: u16 = leader_address.split(':')
+        .nth(1) // Get the port part of the address
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+
+    let dos_port = match leader_port {
+        8080 => Some(8083),
+        8081 => Some(8084),
+        8082 => Some(8085),
+        _ => {
+            eprintln!("Unknown leader port: {}", leader_port);
+            None
+        }
+    };
+
+    if let Some(port) = dos_port {
+        let dos_address = format!("http://localhost:{}", port);
+        println!("DOS Address determined: {}", dos_address);
+
+        // Get client_id and password from the user
+        let mut client_id = String::new();
+        print!("Enter client ID: ");
+        io::stdout().flush()?; // Ensure prompt is visible before user input
+        io::stdin().read_line(&mut client_id)?;
+        let client_id = client_id.trim_end(); // Remove any trailing newline
+
+        let mut password = String::new();
+        print!("Enter password: ");
+        io::stdout().flush()?; // Ensure prompt is visible before user input
+        io::stdin().read_line(&mut password)?;
+        let password = password.trim_end(); // Remove any trailing newline
+
+        register_client(&dos_address, client_id, password).await?;
+        if let Ok(local_ip) = get_local_ip().await {
+            match update_client_ip(&dos_address, client_id, &local_ip.to_string()).await {
+                Ok(response) => println!("Client IP updated successfully: {}", response),
+                Err(e) => eprintln!("Error updating client IP: {}", e),
+            }
+        }
+    } else {
+        return Err("DOS port was not determined. Exiting...".into());
+    }
+
+    Ok(())
+}
+
+pub async fn update_client_ip(
+    dos_address: &str,
+    client_id: &str,
+    current_ip: &str,
+) -> Result<String, Box<dyn Error>> {
+    let client = Client::new();
+
+    let payload = json!({
+        "id": client_id,
+        "current_ip": current_ip
+    });
+
+    let response = client
+        .post(format!("{}/update_ip", dos_address))
+        .json(&payload)
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let response_text = response.text().await?;
+        Ok(response_text)
+    } else {
+        Err(format!(
+            "Failed to update IP (status: {}): {}",
+            response.status(),
+            response.text().await.unwrap_or_else(|_| "No response body".to_string())
+        )
+        .into())
+    }
+}
+
+async fn get_local_ip() -> Result<IpAddr, Box<dyn Error>> {
+    // Use a UDP socket to determine the local IP address
+    let socket = StdUdpSocket::bind("0.0.0.0:0")?;
+    socket.connect("8.8.8.8:80")?; // Connect to a public DNS server to resolve the local address
+    let local_addr = socket.local_addr()?;
+    Ok(local_addr.ip())
+}
+
+
+async fn request_leader(socket: &UdpSocket) -> Result<String, Box<dyn Error>> {
     let request_message = "REQUEST_LEADER";
 
+    // Send request to all servers
     for server in &SERVER_ADDRS {
-        // Send the CPU usage request to each server
         socket.send_to(request_message.as_bytes(), server).await?;
         println!("Sent CPU usage request to {}", server);
     }
 
     // Wait to receive the leader address
     let mut buffer = [0; 1024];
-    let mut dos_port: Option<u16> = None;
     match timeout(TIMEOUT_DURATION, socket.recv_from(&mut buffer)).await {
         Ok(Ok((len, addr))) => {
             let response = String::from_utf8_lossy(&buffer[..len]);
             if response.starts_with("LEADER,") {
-                let leader_address = &response[7..]; // Extracting the leader address
+                let leader_address = response[7..].to_string(); // Extracting the leader address
                 println!("Received leader address: {} from {}", leader_address, addr);
-                // Determine the DOS port based on the leader's port
-            let leader_port: u16 = leader_address.split(':')
-            .nth(1) // Get the port part of the address
-            .unwrap_or("0")
-            .parse()
-            .unwrap_or(0);
-
-        dos_port = match leader_port {
-            8080 => Some(8083),
-            8081 => Some(8084),
-            8082 => Some(8085),
-            _ => {
-                eprintln!("Unknown leader port: {}", leader_port);
-                None
-            }
-        };
-
-                // Start the image transfer process
-                middleware_encrypt(&socket, leader_address).await?;
-                
-                // Receive the encrypted image back from the server
-                // receive_image(&socket).await?;
-
-                // //decode the received image
-                // decode_image("encoded_image_received.png").await?;
-
-                middleware_decrypt(&socket).await?;
-
-
+                Ok(leader_address)
             } else {
-                println!("Unexpected response: {}", response);
+                Err("Unexpected response received".into())
             }
         },
-        Ok(Err(e)) => {
-            println!("Failed to receive response: {}", e);
-        },
-        Err(_) => {
-            println!("Timeout waiting for leader response");
-        },
+        Ok(Err(e)) => Err(format!("Failed to receive response: {}", e).into()),
+        Err(_) => Err("Timeout waiting for leader response".into()),
     }
-    if let Some(port) = dos_port {
-        let dos_address = format!("http://localhost:{}", port);
-        println!("DOS Address determined: {}", dos_address);
-    
-        // // Use the dos_address for further actions
-        let client_id = "sisi";
-        let password = "sisira2esy";
-        let image_path = "image2.jpg";
-    
-        match add_image_to_dos(&dos_address, client_id, password, image_path).await {
-            Ok(response) => println!("Image added successfully: {}", response),
-            Err(e) => eprintln!("Error adding image: {}", e),
-        }
-    //     let client_id = "sisi";
-    // let password = "sisira2esy";
-
-    // match register_client(&dos_address, client_id, password).await {
-    //     Ok(response) => println!("Client registered successfully: {}", response),
-    //     Err(e) => eprintln!("Error registering client: {}", e),
-    // }
-    } else {
-        eprintln!("DOS port was not determined. Exiting...");
-    }
-    // // // Step 1: Register a client
-    // println!("{}",leader_address);
-    // println!("Client: Starting the registration process...");
-    //  let dos_address = "http://localhost:3030";
-    
-
-    // // Step 2: Update the client's IP address
-    // if let Ok(local_ip) = get_local_ip().await {
-    //     match update_client_ip(dos_address, client_id, &local_ip.to_string()).await {
-    //         Ok(response) => println!("Client IP updated successfully: {}", response),
-    //         Err(e) => eprintln!("Error updating client IP: {}", e),
-    //     }
-    // }
-
-    // // Step 3: Add an image to the directory
-    // let image_path = "image2.jpg";
-    // match add_image_to_dos(dos_address, client_id, password, image_path).await {
-    //     Ok(response) => println!("Image added successfully: {}", response),
-    //     Err(e) => eprintln!("Error adding image: {}", e),
-    // }
-    // // Step 3: Add an image to the directory
-    // let image_path = "image3.jpg";
-    // match add_image_to_dos(dos_address, client_id, password, image_path).await {
-    //     Ok(response) => println!("Image added successfully: {}", response),
-    //     Err(e) => eprintln!("Error adding image: {}", e),
-    // }
-    // // Step 3: Add an image to the directory
-    // let image_path = "image3.jpg";
-    // match add_image_to_dos(dos_address, client_id, password, image_path).await {
-    //     Ok(response) => println!("Image added successfully: {}", response),
-    //     Err(e) => eprintln!("Error adding image: {}", e),
-    // }
-
-    // // // Step 4: Fetch composite image for the client
-    // // let output_path = "composite_image.png";
-    // // match fetch_composite_image(dos_address, client_id, output_path).await {
-    // //     Ok(_) => println!("Composite image fetched and saved to {}", output_path),
-    // //     Err(e) => eprintln!("Error fetching composite image: {}", e),
-    // // }
-
-    // // // Step 5: Delete the image from the directory
-    // // let image_name = image_path; // Same name as added image
-    // // match delete_image_from_dos(dos_address, client_id, password, image_name).await {
-    // //     Ok(response) => println!("Image deleted successfully: {}", response),
-    // //     Err(e) => eprintln!("Error deleting image: {}", e),
-    // // }
-    // let output_path = "composite_image2.png";
-    // // Step 6: Fetch composite image again to verify deletion
-    // match fetch_composite_image(dos_address, client_id, output_path).await {
-    //     Ok(_) => println!("Composite image updated and saved to {}", output_path),
-    //     Err(e) => eprintln!("Error fetching composite image after deletion: {}", e),
-    // }
-
-    Ok(())
 }
 
 async fn middleware_encrypt(socket: &UdpSocket, leader_addr: &str) -> tokio::io::Result<()> {
@@ -204,6 +357,25 @@ async fn receive_ack(socket: &UdpSocket) -> bool {
     }
 }
 
+/// Receive and decode an image from the server.
+async fn middleware_decrypt(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
+    receive_image(socket).await?;
+    decode_image("encoded_image_received.png").await?;
+    Ok(())
+}
+
+/// Decode the received image and save the decoded output.
+async fn decode_image(file_path: &str) -> Result<(), Box<dyn Error>> {
+    let encoded_image = file_as_dynamic_image(file_path.to_string()).to_rgba();
+    let decoder = Decoder::new(encoded_image);
+
+    let decoded_data = decoder.decode_alpha();
+    let output_path = "decoded_output.png";
+    std::fs::write(output_path, &decoded_data)?;
+    println!("Image decoded and saved to {}", output_path);
+    Ok(())
+}
+
 /// Receive image data from the server in chunks and save it as a PNG file.
 async fn receive_image(socket: &UdpSocket) -> tokio::io::Result<()> {
     let mut file = File::create("encoded_image_received.png").await?;
@@ -237,75 +409,12 @@ async fn receive_image(socket: &UdpSocket) -> tokio::io::Result<()> {
     Ok(())
 }
 
-/// Decode the received image and save the decoded output.
-async fn decode_image(file_path: &str) -> Result<(), Box<dyn Error>> {
-    let encoded_image = file_as_dynamic_image(file_path.to_string()).to_rgba();
-    let decoder = Decoder::new(encoded_image);
-
-    let decoded_data = decoder.decode_alpha();
-    let output_path = "decoded_output.png";
-    std::fs::write(output_path, &decoded_data)?;
-    println!("Image decoded and saved to {}", output_path);
-    Ok(())
-}
-
-fn resize_image(image_path: &str) -> Result<DynamicImage, Box<dyn Error>> {
-    let image = ImageReader::open(image_path)?.decode()?;
-    let resized_image = image.resize_exact(200, 200, image::imageops::FilterType::Triangle);
-    Ok(resized_image)
-}
-fn encode_image_to_base64(image: &DynamicImage) -> Result<String, Box<dyn Error>> {
-    let mut buffer = Vec::new();
-    let mut cursor = Cursor::new(&mut buffer); // Wrap Vec<u8> in Cursor
-    image.write_to(&mut cursor, ImageOutputFormat::Png)?;
-    Ok(base64::encode(&buffer))
-}
-/// Returns the local IP address of the client.
-///
-/// This function is now asynchronous to support `.await`.
-async fn get_local_ip() -> Result<IpAddr, Box<dyn Error>> {
-    // Use a UDP socket to determine the local IP address
-    let socket = StdUdpSocket::bind("0.0.0.0:0")?;
-    socket.connect("8.8.8.8:80")?; // Connect to a public DNS server to resolve the local address
-    let local_addr = socket.local_addr()?;
-    Ok(local_addr.ip())
-}
-pub async fn fetch_composite_image(
-    dos_address: &str,
-    client_id: &str,
-    output_path: &str,
-) -> Result<(), Box<dyn Error>> {
-    // Create an HTTP client
-    let client = Client::new();
-
-    // Construct the URL with query parameters
-    let url = format!("{}/list_by_client?client_id={}", dos_address, client_id);
-
-    // Send the GET request
-    let response = client.get(&url).send().await?;
-
-    // Check if the response status is success
-    if response.status().is_success() {
-        let image_bytes = response.bytes().await?;
-        // Save the image to the specified output path
-        let mut file = File::create(output_path).await?;
-        file.write_all(&image_bytes).await?;
-        println!("Composite image saved to {}", output_path);
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to fetch composite image (status: {}): {}",
-            response.status(),
-            response.text().await.unwrap_or_else(|_| "No response body".to_string())
-        )
-        .into())
-    }
-}
 pub async fn add_image_to_dos(
     dos_address: &str,
     client_id: &str,
     password: &str,
     image_path: &str,
+    access_users: Vec<String>, // New parameter for access users
 ) -> Result<String, Box<dyn Error>> {
     let client = Client::new();
 
@@ -316,7 +425,8 @@ pub async fn add_image_to_dos(
         "client_id": client_id,
         "password": password,
         "image_name": image_path,
-        "image_data": base64_image
+        "image_data": base64_image,
+        "access_users": access_users // Include the access_users field
     });
 
     let response = client
@@ -337,38 +447,41 @@ pub async fn add_image_to_dos(
         .into())
     }
 }
-pub async fn delete_image_from_dos(
-    dos_address: &str,
-    client_id: &str,
-    password: &str,
-    image_name: &str,
-) -> Result<String, Box<dyn Error>> {
+
+pub async fn fetch_clients_from_dos(dos_address: &str) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
+    let url = format!("{}/fetch_clients", dos_address);
 
-    let payload = json!({
-        "client_id": client_id,
-        "password": password,
-        "image_name": image_name,
-    });
-
-    let response = client
-        .post(format!("{}/delete_image", dos_address))
-        .json(&payload)
-        .send()
-        .await?;
+    // Send the GET request
+    let response = client.get(&url).send().await?;
 
     if response.status().is_success() {
-        let response_text = response.text().await?;
-        Ok(response_text)
+        let clients_with_ips: serde_json::Value = response.json().await?;
+        println!("Fetched clients with their IPs: {}", clients_with_ips);
+        Ok(())
     } else {
         Err(format!(
-            "Failed to delete image (status: {}): {}",
+            "Failed to fetch clients (status: {}): {}",
             response.status(),
             response.text().await.unwrap_or_else(|_| "No response body".to_string())
         )
         .into())
     }
 }
+
+fn resize_image(image_path: &str) -> Result<DynamicImage, Box<dyn Error>> {
+    let image = ImageReader::open(image_path)?.decode()?;
+    let resized_image = image.resize_exact(200, 200, image::imageops::FilterType::Triangle);
+    Ok(resized_image)
+}
+
+fn encode_image_to_base64(image: &DynamicImage) -> Result<String, Box<dyn Error>> {
+    let mut buffer = Vec::new();
+    let mut cursor = Cursor::new(&mut buffer); // Wrap Vec<u8> in Cursor
+    image.write_to(&mut cursor, ImageOutputFormat::Png)?;
+    Ok(base64::encode(&buffer))
+}
+
 pub async fn register_client(
     dos_address: &str,
     client_id: &str,
@@ -398,41 +511,4 @@ pub async fn register_client(
         )
         .into())
     }
-}
-pub async fn update_client_ip(
-    dos_address: &str,
-    client_id: &str,
-    current_ip: &str,
-) -> Result<String, Box<dyn Error>> {
-    let client = Client::new();
-
-    let payload = json!({
-        "id": client_id,
-        "current_ip": current_ip
-    });
-
-    let response = client
-        .post(format!("{}/update_ip", dos_address))
-        .json(&payload)
-        .send()
-        .await?;
-
-    if response.status().is_success() {
-        let response_text = response.text().await?;
-        Ok(response_text)
-    } else {
-        Err(format!(
-            "Failed to update IP (status: {}): {}",
-            response.status(),
-            response.text().await.unwrap_or_else(|_| "No response body".to_string())
-        )
-        .into())
-    }
-}
-
-/// Receive and decode an image from the server.
-async fn middleware_decrypt(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
-    receive_image(socket).await?;
-    decode_image("encoded_image_received.png").await?;
-    Ok(())
 }
