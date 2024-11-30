@@ -32,7 +32,15 @@ use flate2::Compression;
 use std::io::Write;
 use flate2::read::GzDecoder;
 use std::io::Read;
+use tokio::task;
+use chrono::Utc;
+use tokio::io::{self};
+use tokio::net::TcpStream;
+use tokio::net::TcpListener;
+use tokio::io::{AsyncBufReadExt, BufReader as OtherBufReader};
 use serde_json::Value;
+
+use tokio::time;
 const CHUNK_SIZE: usize = 1024;
 const ACK: &[u8] = b"ACK";
 static IS_LEADER: AtomicBool = AtomicBool::new(false);
@@ -235,6 +243,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let own_address = "127.0.0.1:8080";
     let peer_addresses = vec!["127.0.0.1:8081", "127.0.0.1:8082"];
     let socket = Arc::new(UdpSocket::bind(own_address).await?);
+    let jsons_addresses = vec!["127.0.0.1:5002", "127.0.0.1:5003"];
     //  Directory::new().save_to_file("directory.json");
     // ClientDirectory::new().save_to_file("clients.json");
 
@@ -247,29 +256,34 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let socket_clone = Arc::clone(&socket);
     let server_task = tokio::spawn(leader_election(socket_clone, peer_addresses));
 
-    // Synchronization Socket
-    let sync_socket = Arc::new(UdpSocket::bind("127.0.0.1:5001").await?); // Ensure this port is available
+    // Define addresses for the JSON listener
+    let listener_addresses = "127.0.0.1:5001";
 
-    // Initialize the chunk buffer for synchronization
-    let chunk_buffer: ChunkBuffer = Arc::new(new_Mutex::new(HashMap::new())); // Use tokio::sync::Mutex
-
-    let sync_task = tokio::spawn(synchronize_files(sync_socket, chunk_buffer.clone()));
+    // Spawn the listener task
+    let listener_task = task::spawn(async move {
+        if let Err(err) = listen_and_save_json(&listener_addresses).await {
+            eprintln!("Error in listener task: {}", err);
+        }
+    });
 
     // DOS Server Task
     let ip = [127, 0, 0, 1];
     let port = 8083;
     let dos_task = run_dos(ip, port).await;
 
-    // Periodic Synchronization Task for JSONs
-    let jsons_task = tokio::spawn(periodic_synchronize(
-        vec!["127.0.0.1:5002", "127.0.0.1:5003"], // List of peers
-        Arc::clone(&socket),                     // Shared socket
-        Arc::clone(&directory),                  // Shared directory
-        Arc::clone(&client_directory),           // Shared client directory
-    ));
+    // Sender Task (periodically sends JSON files to peers)
+    let sender_task = tokio::spawn(async move {
+        send_json_files_to_peers(
+            &jsons_addresses,
+            "directory.json",
+            "clients.json"
+        ).await
+    });
+
+   
 
     // Run all tasks concurrently
-    tokio::try_join!(server_task, dos_task, sync_task,jsons_task)?;
+    tokio::try_join!(server_task, dos_task, listener_task,sender_task)?;
 
     Ok(())
 }
@@ -286,6 +300,19 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     // ClientDirectory::new().save_to_file("clients.json");
 
     let (notifier_tx, _) = broadcast::channel(100);
+    tokio::spawn(async move {
+        loop {
+            let file_path = "directory.json";
+            let clients_file_path = "clients.json";
+            let directory: SharedDirectory = Arc::new(Mutex::new(Directory::load_from_file(file_path)));
+            let client_directory: SharedClientDirectory = Arc::new(Mutex::new(ClientDirectory::load_from_file(clients_file_path)));
+           
+    
+            // Wait for 10 seconds before the next iteration
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
+    
 
     let add_image = warp::path("add_image")
     .and(warp::post())
@@ -823,158 +850,123 @@ const MAX_UDP_PAYLOAD: usize = 4096; // Maximum safe size for UDP payloads
 //         }
 //     }
 // }
-async fn send_update_to_peers(
-    peers: &[&str],
-    socket: &Arc<UdpSocket>,
-    file_name: &str,
-    data: &str,
-) {
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(data.as_bytes()).expect("Compression failed");
-    let compressed_data = encoder.finish().expect("Failed to finish compression");
-    let compressed_base64 = base64::encode(&compressed_data);
+async fn send_json_files_to_peers(
+    peers: &[&str], 
+    directory_path: &str, 
+    clients_path: &str
+) -> io::Result<()> {
+    loop {
+        if is_leader() {
+            println!("This instance is the leader. Sending JSON files to peers...");
 
-    let data_bytes = compressed_base64.as_bytes();
-    let data_len = data_bytes.len();
-    let chunks = (data_len + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD; // Calculate number of chunks
+            // Read directory.json
+            let mut dir_file = File::open(directory_path).await?;
+            let mut dir_json = String::new();
+            dir_file.read_to_string(&mut dir_json).await?;
+            println!("Read directory.json successfully!");
 
-    for peer in peers {
-        for chunk_id in 0..chunks {
-            let start = chunk_id * MAX_UDP_PAYLOAD;
-            let end = std::cmp::min(start + MAX_UDP_PAYLOAD, data_len);
-            let chunk_data = &data_bytes[start..end];
+            // Read clients.json
+            let mut clients_file = File::open(clients_path).await?;
+            let mut clients_json = String::new();
+            clients_file.read_to_string(&mut clients_json).await?;
+            println!("Read clients.json successfully!");
+            
+            // Iterate through peers and send JSON files
+            for &addr in peers {
+                match TcpStream::connect(addr).await {
+                    Ok(mut stream) => {
+                        println!("Connected to {}", addr);
 
-            let chunk_message = json!({
-                "type": "update",
-                "file": file_name,
-                "chunk_id": chunk_id,
-                "total_chunks": chunks,
-                "data": String::from_utf8_lossy(chunk_data)
-            })
-            .to_string();
+                        // Send directory.json with file_name
+                        let directory_message = json!({
+                            "file_name": "directory.json",
+                            "data": dir_json
+                        })
+                        .to_string();
+                        println!("Sending directory.json to {}...", addr);
+                        if let Err(err) = stream.write_all(directory_message.as_bytes()).await {
+                            eprintln!("Failed to send directory.json to {}: {}", addr, err);
+                            continue;
+                        }
+                        stream.write_all(b"\n").await?;
 
-            if let Err(err) = socket.send_to(chunk_message.as_bytes(), peer).await {
-                eprintln!(
-                    "Failed to send {} chunk {} to {}: {}",
-                    file_name, chunk_id, peer, err
-                );
-            } else {
-                println!("Sent {} chunk {} to {}", file_name, chunk_id, peer);
+                        // Send clients.json with file_name
+                        let clients_message = json!({
+                            "file_name": "clients.json",
+                            "data": clients_json
+                        })
+                        .to_string();
+                        println!("Sending clients.json to {}...", addr);
+                        if let Err(err) = stream.write_all(clients_message.as_bytes()).await {
+                            eprintln!("Failed to send clients.json to {}: {}", addr, err);
+                            continue;
+                        }
+                        stream.write_all(b"\n").await?;
+
+                        println!("JSON files sent to {}", addr);
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to connect to {}: {}", addr, err);
+                    }
+                }
             }
+        } else {
+            println!("This instance is not the leader. Skipping JSON transmission...");
         }
+
+        time::sleep(Duration::from_secs(10)).await;
     }
 }
-async fn periodic_synchronize(
-    peers: Vec<&str>,
-    socket: Arc<UdpSocket>,
-    directory: SharedDirectory,
-    client_directory: SharedClientDirectory,
-) {
-    loop {
-        let dir_data = serde_json::to_string(&*directory.lock().unwrap()).unwrap_or_default();
-        let client_data = serde_json::to_string(&*client_directory.lock().unwrap()).unwrap_or_default();
-        
-            
-                if is_leader() {
-                    send_update_to_peers(&peers, &socket, "directory.json", &dir_data).await;
-        send_update_to_peers(&peers, &socket, "clients.json", &client_data).await;
 
-        tokio::time::sleep(Duration::from_secs(10)).await;
-                   
-                } else {
-                    println!("Not the leader. Waiting for leadership...");
-                    sleep(Duration::from_secs(5)).await;
-                }
-            
-        }
 
-        
-    
-}
 
-type ChunkBuffer = Arc<new_Mutex<HashMap<String, HashMap<usize, Option<String>>>>>;
-async fn synchronize_files(socket: Arc<UdpSocket>, chunk_buffer: ChunkBuffer) {
-    let mut buffer = [0; 4096]; // Maximum UDP payload size
+
+pub async fn listen_and_save_json(address: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let listener = TcpListener::bind(address).await?;
+    println!("Listening on {}", address);
 
     loop {
-        match socket.recv_from(&mut buffer).await {
-            Ok((len, addr)) => {
-                let message = String::from_utf8_lossy(&buffer[..len]);
-                match serde_json::from_str::<Value>(&message) {
-                    Ok(sync_data) => {
-                        if let (Some(file), Some(chunk_id), Some(total_chunks), Some(chunk_data)) = (
-                            sync_data["file"].as_str(),
-                            sync_data["chunk_id"].as_u64(),
-                            sync_data["total_chunks"].as_u64(),
-                            sync_data["data"].as_str(),
-                        ) {
-                            let mut buffer = chunk_buffer.lock().await;
+        let (socket, addr) = listener.accept().await?;
+        println!("New connection from: {}", addr);
 
-                            let file_chunks = buffer
-                                .entry(file.to_string())
-                                .or_insert_with(HashMap::new);
+        tokio::spawn(async move {
+            let mut reader = OtherBufReader::new(socket);
+            let mut line = String::new();
 
-                            file_chunks.insert(chunk_id as usize, Some(chunk_data.to_string()));
+            while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(json) => {
+                        if let Some(file_name) = json.get("file_name").and_then(|v| v.as_str()) {
+                            if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
+                                println!("Received JSON for file: {}", file_name);
 
-                            // Check if all chunks are received
-                            if file_chunks.len() == total_chunks as usize
-                                && (0..total_chunks).all(|i| file_chunks.contains_key(&(i as usize)))
-                            {
-                                let complete_base64: String = file_chunks
-                                    .iter()
-                                    .sorted_by_key(|&(index, _)| index)
-                                    .filter_map(|(_, chunk)| chunk.clone())
-                                    .collect();
-
-                                let compressed_data =
-                                    base64::decode(&complete_base64).expect("Base64 decoding failed");
-                                let mut decoder = GzDecoder::new(&compressed_data[..]);
-                                let mut decompressed_data = String::new();
-                                decoder
-                                    .read_to_string(&mut decompressed_data)
-                                    .expect("Decompression failed");
-
-                                println!("Received complete file: {}", file);
-
-                                match file {
-                                    "directory.json" => {
-                                        println!("Processing directory.json...");
-                                        // Process the decompressed directory.json
-                                    }
-                                    "clients.json" => {
-                                        println!("Processing clients.json...");
-                                        // Process the decompressed clients.json
-                                    }
-                                    _ => eprintln!("Unknown file type received: {}", file),
+                                if let Err(err) = save_json_to_file(file_name, data).await {
+                                    eprintln!("Failed to save JSON to {}: {}", file_name, err);
                                 }
-
-                                buffer.remove(file); // Remove entry after processing
                             } else {
-                                println!(
-                                    "Waiting for more chunks for file: {}. Received: {}/{}",
-                                    file,
-                                    file_chunks.len(),
-                                    total_chunks
-                                );
+                                eprintln!("Missing 'data' field in received JSON");
                             }
                         } else {
-                            eprintln!("Invalid or incomplete sync data: {}", message);
+                            eprintln!("Missing 'file_name' field in received JSON");
                         }
                     }
                     Err(err) => {
-                        eprintln!(
-                            "Failed to parse synchronization message from {}: {}. Error: {}",
-                            addr, message, err
-                        );
+                        eprintln!("Failed to parse JSON: {}", err);
                     }
                 }
+                line.clear();
             }
-            Err(err) => {
-                eprintln!("Error receiving data on synchronization socket: {}", err);
-            }
-        }
+        });
     }
 }
+
+async fn save_json_to_file(filename: &str, content: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut file = File::create(filename).await?;
+    file.write_all(content.as_bytes()).await?;
+    println!("Saved JSON to {}", filename);
+    Ok(())
+}
+
 
 
 // async fn synchronize_files(socket: Arc<UdpSocket>, chunk_buffer: ChunkBuffer) {
