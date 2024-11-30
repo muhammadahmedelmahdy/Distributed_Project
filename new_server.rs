@@ -134,45 +134,104 @@ async fn handle_ws_connection(ws: WebSocket, mut rx: broadcast::Receiver<String>
         }
     }
 }
-fn create_composite_image(images: &[String]) -> Result<DynamicImage, Box<dyn std::error::Error>> {
-    const FONT_PATH: &str = "/home/muhammadelmahdy/Distributed_Project/Roboto-Bold.ttf"; // Update to point to a valid .ttf font
+// fn create_composite_image(images: &[String]) -> Result<DynamicImage, Box<dyn std::error::Error>> {
+//     const FONT_PATH: &str = "/home/muhammadelmahdy/Distributed_Project/Roboto-Bold.ttf"; // Update to point to a valid .ttf font
+//     let font_data = std::fs::read(FONT_PATH)?;
+//     let font = Font::try_from_vec(font_data).ok_or("Failed to load font")?;
+
+//     let mut decoded_images = Vec::new();
+//     for img_data in images {
+//         let image_json: serde_json::Value = serde_json::from_str(img_data)?;
+//         let image_name = image_json["name"].as_str().unwrap_or("Unknown");
+//         let image_base64 = image_json["data"].as_str().unwrap();
+//         let decoded_bytes = general_purpose::STANDARD.decode(image_base64)?;
+//         let decoded_image = image::load_from_memory(&decoded_bytes)?;
+
+//         decoded_images.push((image_name.to_string(), decoded_image));
+//     }
+
+//     let total_width = decoded_images.iter().map(|(_, img)| img.width()).max().unwrap_or(0);
+//     let total_height: u32 = decoded_images.iter().map(|(_, img)| img.height()).sum();
+
+//     let mut composite = ImageBuffer::new(total_width, total_height);
+//     let mut y_offset = 0;
+
+//     for (image_name, img) in decoded_images {
+//         composite.copy_from(&img.to_rgba8(), 0, y_offset)?;
+//         let scale = Scale { x: 20.0, y: 20.0 };
+//         let text_color = Rgba([255, 255, 255, 255]);
+//         draw_text_mut(&mut composite, text_color, 10, y_offset as i32 + 10, scale, &font, &image_name);
+
+//         y_offset += img.height();
+//     }
+
+//     Ok(DynamicImage::ImageRgba8(composite))
+// }
+fn create_composite_image(
+    images: &[String],
+) -> Result<DynamicImage, Box<dyn std::error::Error>> {
+    const FONT_PATH: &str = "/home/muhammadelmahdy/Distributed_Project/Roboto-Bold.ttf"; // Update to the correct font path
     let font_data = std::fs::read(FONT_PATH)?;
     let font = Font::try_from_vec(font_data).ok_or("Failed to load font")?;
 
     let mut decoded_images = Vec::new();
     for img_data in images {
+        // Deserialize the image JSON string
         let image_json: serde_json::Value = serde_json::from_str(img_data)?;
         let image_name = image_json["name"].as_str().unwrap_or("Unknown");
+        let client_id = image_json["client_id"].as_str().unwrap_or("Unknown");
         let image_base64 = image_json["data"].as_str().unwrap();
         let decoded_bytes = general_purpose::STANDARD.decode(image_base64)?;
         let decoded_image = image::load_from_memory(&decoded_bytes)?;
 
-        decoded_images.push((image_name.to_string(), decoded_image));
+        decoded_images.push((client_id.to_string(), image_name.to_string(), decoded_image));
     }
 
-    let total_width = decoded_images.iter().map(|(_, img)| img.width()).max().unwrap_or(0);
-    let total_height: u32 = decoded_images.iter().map(|(_, img)| img.height()).sum();
+    let total_width = decoded_images.iter().map(|(_, _, img)| img.width()).max().unwrap_or(0);
+    let total_height: u32 = decoded_images.iter().map(|(_, _, img)| img.height()).sum();
 
     let mut composite = ImageBuffer::new(total_width, total_height);
     let mut y_offset = 0;
 
-    for (image_name, img) in decoded_images {
+    for (client_id, image_name, img) in decoded_images {
         composite.copy_from(&img.to_rgba8(), 0, y_offset)?;
-        let scale = Scale { x: 20.0, y: 20.0 };
-        let text_color = Rgba([255, 255, 255, 255]);
-        draw_text_mut(&mut composite, text_color, 10, y_offset as i32 + 10, scale, &font, &image_name);
 
-        y_offset += img.height();
+       // Draw client ID and image name line by line
+       let scale = Scale { x: 20.0, y: 20.0 };
+       let text_color = Rgba([255, 255, 255, 255]);
+       let lines = vec![
+           format!("Client: {}", client_id),
+           format!("Name: {}", image_name),
+       ];
+       let mut text_y_offset = y_offset as i32 + 10; // Starting position for text
+
+       for line in lines {
+           draw_text_mut(
+               &mut composite,
+               text_color,
+               10,
+               text_y_offset,
+               scale,
+               &font,
+               &line,
+           );
+           text_y_offset += scale.y as i32 + 5; // Add line height and some padding
+       }
+
+       y_offset += img.height();
     }
 
     Ok(DynamicImage::ImageRgba8(composite))
 }
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let own_address = "127.0.0.1:8080";
     let peer_addresses = vec!["127.0.0.1:8081", "127.0.0.1:8082"];
     let socket = Arc::new(UdpSocket::bind(own_address).await?);
+    //  Directory::new().save_to_file("directory.json");
+    // ClientDirectory::new().save_to_file("clients.json");
 
     // Load shared directory and client directory
     let directory: SharedDirectory = Arc::new(Mutex::new(Directory::load_from_file("directory.json")));
@@ -223,7 +282,6 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
 
     let (notifier_tx, _) = broadcast::channel(100);
 
-    // Define routes
     let add_image = warp::path("add_image")
     .and(warp::post())
     .and(warp::body::json())
@@ -235,6 +293,10 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
         let password = body.get("password").unwrap();
         let image_name = body.get("image_name").unwrap();
         let image_data = body.get("image_data").unwrap();
+        let access_users: Vec<String> = match body.get("access_users") {
+            Some(users) => serde_json::from_str(users).unwrap_or_else(|_| Vec::new()), // Deserialize JSON array or default to empty
+            None => Vec::new(), // Default to empty if not provided
+        };
 
         // Authenticate the client
         let client_dir = client_dir.lock().unwrap();
@@ -256,7 +318,8 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
         images.push(
             json!({
                 "name": image_name,
-                "data": image_data
+                "data": image_data,
+                "access_users": access_users // Include the new field
             })
             .to_string(),
         );
@@ -264,10 +327,10 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
         dir.save_to_file("directory.json");
         let notification = format!("Client {} added image {}", client_id, image_name);
         let _ = notifier.send(notification.clone());
-        
 
         warp::reply::json(&notification)
     });
+
 
     let delete_image = warp::path("delete_image")
     .and(warp::post())
@@ -320,60 +383,166 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
 
 
     let list_all = warp::path("list_all")
-        .and(warp::get())
-        .and(with_directory(directory.clone()))
-        .map(|dir: SharedDirectory| {
-            let dir = dir.lock().unwrap();
-            warp::reply::json(&dir.clients)
-        });
+    .and(warp::get())
+    .and(with_directory(directory.clone()))
+    .map(|dir: SharedDirectory| {
+        let dir = dir.lock().unwrap();
 
-    let list_by_client = warp::path("list_by_client")
-        .and(warp::get())
-        .and(warp::query::<HashMap<String, String>>())
-        .and(with_directory(directory.clone()))
-        .map(|query: HashMap<String, String>, dir: SharedDirectory| {
-            let default_client_id = String::from("");
-            let client_id = query.get("client_id").unwrap_or(&default_client_id);
+        // Collect all images along with their respective client IDs
+        let mut all_images = Vec::new();
+        for (client_id, images) in &dir.clients {
+            for image in images {
+                if let Ok(mut image_data) = serde_json::from_str::<serde_json::Value>(image) {
+                    image_data["client_id"] = serde_json::Value::String(client_id.clone());
+                    all_images.push(image_data.to_string());
+                }
+            }
+        }
 
-            let dir = dir.lock().unwrap();
-
-            let images = match dir.clients.get(client_id) {
-                Some(images) => images.clone(),
-                None => {
+        match create_composite_image(&all_images) {
+            Ok(composite_image) => {
+                let mut buffer = Cursor::new(Vec::new());
+                if composite_image
+                    .write_to(&mut buffer, ImageOutputFormat::Png)
+                    .is_err()
+                {
                     return warp::http::Response::builder()
-                        .status(404)
+                        .status(500)
                         .header("Content-Type", "text/plain")
-                        .body("No images found".to_string().into_bytes())
+                        .body("Failed to encode composite image".to_string().into_bytes())
                         .unwrap();
                 }
-            };
 
-            match create_composite_image(&images) {
-                Ok(composite_image) => {
-                    let mut buffer = Cursor::new(Vec::new());
-                    if composite_image
-                        .write_to(&mut buffer, ImageOutputFormat::Png)
-                        .is_err()
-                    {
-                        return warp::http::Response::builder()
-                            .status(500)
-                            .header("Content-Type", "text/plain")
-                            .body("Failed to encode composite image".to_string().into_bytes())
-                            .unwrap();
-                    }
-
-                    warp::http::Response::builder()
-                        .header("Content-Type", "image/png")
-                        .body(buffer.into_inner())
-                        .unwrap()
-                }
-                Err(e) => warp::http::Response::builder()
-                    .status(500)
-                    .header("Content-Type", "text/plain")
-                    .body(format!("Failed to create composite image: {}", e).into_bytes())
-                    .unwrap(),
+                warp::http::Response::builder()
+                    .header("Content-Type", "image/png")
+                    .body(buffer.into_inner())
+                    .unwrap()
             }
+            Err(e) => warp::http::Response::builder()
+                .status(500)
+                .header("Content-Type", "text/plain")
+                .body(format!("Failed to create composite image: {}", e).into_bytes())
+                .unwrap(),
+        }
+    });
+
+    let list_by_client = warp::path("list_by_client")
+    .and(warp::get())
+    .and(warp::query::<HashMap<String, String>>())
+    .and(with_directory(directory.clone()))
+    .map(|query: HashMap<String, String>, dir: SharedDirectory| {
+        let default_client_id = String::new();
+        let client_id = query.get("client_id").unwrap_or(&default_client_id);
+
+        let dir = dir.lock().unwrap();
+
+        let images = match dir.clients.get(client_id) {
+            Some(images) => {
+                let mut client_images = Vec::new();
+                for image in images {
+                    if let Ok(mut image_data) = serde_json::from_str::<serde_json::Value>(image) {
+                        image_data["client_id"] = serde_json::Value::String(client_id.clone());
+                        client_images.push(image_data.to_string());
+                    }
+                }
+                client_images
+            }
+            None => {
+                return warp::http::Response::builder()
+                    .status(404)
+                    .header("Content-Type", "text/plain")
+                    .body("No images found".to_string().into_bytes())
+                    .unwrap();
+            }
+        };
+
+        match create_composite_image(&images) {
+            Ok(composite_image) => {
+                let mut buffer = Cursor::new(Vec::new());
+                if composite_image
+                    .write_to(&mut buffer, ImageOutputFormat::Png)
+                    .is_err()
+                {
+                    return warp::http::Response::builder()
+                        .status(500)
+                        .header("Content-Type", "text/plain")
+                        .body("Failed to encode composite image".to_string().into_bytes())
+                        .unwrap();
+                }
+
+                warp::http::Response::builder()
+                    .header("Content-Type", "image/png")
+                    .body(buffer.into_inner())
+                    .unwrap()
+            }
+            Err(e) => warp::http::Response::builder()
+                .status(500)
+                .header("Content-Type", "text/plain")
+                .body(format!("Failed to create composite image: {}", e).into_bytes())
+                .unwrap(),
+        }
+    });
+
+        let fetch_clients = warp::path("fetch_clients")
+        .and(warp::get())
+        .and(with_client_directory(client_directory.clone()))
+        .map(|client_dir: SharedClientDirectory| {
+            let client_dir = client_dir.lock().unwrap();
+
+            let clients_with_ips: HashMap<String, Option<String>> = client_dir
+                .clients
+                .iter()
+                .map(|(client_id, client_info)| {
+                    (client_id.clone(), client_info.current_ip.clone())
+                })
+                .collect();
+
+            warp::reply::json(&clients_with_ips)
         });
+
+        let login = warp::path("login")
+    .and(warp::post())
+    .and(warp::body::json())
+    .and(with_client_directory(client_directory.clone()))
+    .map(|body: HashMap<String, String>, client_dir: SharedClientDirectory| {
+        // Extract client_id and password from the request body
+        let default_client_id = String::new();
+        let client_id = body.get("client_id").unwrap_or(&default_client_id);
+
+        let default_password = String::new();
+        let password = body.get("password").unwrap_or(&default_password);
+
+        // Lock the client directory for thread-safe access
+        let client_dir = client_dir.lock().unwrap();
+
+        // Check if the client exists and validate the password
+        if let Some(client_info) = client_dir.clients.get(client_id) {
+            if &client_info.password == password {
+                warp::reply::with_status(
+                    warp::reply::json(&json!({
+                        "message": "Login successful",
+                        "client_id": client_id
+                    })),
+                    warp::http::StatusCode::OK,
+                )
+            } else {
+                warp::reply::with_status(
+                    warp::reply::json(&json!({
+                        "error": "Invalid password"
+                    })),
+                    warp::http::StatusCode::UNAUTHORIZED,
+                )
+            }
+        } else {
+            warp::reply::with_status(
+                warp::reply::json(&json!({
+                    "error": "Client ID not found"
+                })),
+                warp::http::StatusCode::NOT_FOUND,
+            )
+        }
+    });
+
         // Register a new client
         let register_client = warp::path("register_client")
         .and(warp::post())
@@ -443,11 +612,13 @@ let update_ip = warp::path("update_ip")
     });
  
     let routes = register_client
+        .or(fetch_clients)
         .or(update_ip)
         .or(add_image)
         .or(delete_image)
         .or(list_all)
-        .or(list_by_client);
+        .or(list_by_client)
+        .or(login);
 
     tokio::spawn(async move {
             loop {
