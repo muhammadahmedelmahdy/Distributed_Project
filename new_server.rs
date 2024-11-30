@@ -27,7 +27,12 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex as new_Mutex; // Import tokio's Mutex instead of std::sync::Mutex
 use itertools::Itertools;
-
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::Write;
+use flate2::read::GzDecoder;
+use std::io::Read;
+use serde_json::Value;
 const CHUNK_SIZE: usize = 1024;
 const ACK: &[u8] = b"ACK";
 static IS_LEADER: AtomicBool = AtomicBool::new(false);
@@ -255,16 +260,16 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let port = 8083;
     let dos_task = run_dos(ip, port).await;
 
-    // // Periodic Synchronization Task for JSONs
-    // let jsons_task = tokio::spawn(periodic_synchronize(
-    //     vec!["127.0.0.1:8081", "127.0.0.1:8082"], // List of peers
-    //     Arc::clone(&socket),                     // Shared socket
-    //     Arc::clone(&directory),                  // Shared directory
-    //     Arc::clone(&client_directory),           // Shared client directory
-    // ));
+    // Periodic Synchronization Task for JSONs
+    let jsons_task = tokio::spawn(periodic_synchronize(
+        vec!["127.0.0.1:5002", "127.0.0.1:5003"], // List of peers
+        Arc::clone(&socket),                     // Shared socket
+        Arc::clone(&directory),                  // Shared directory
+        Arc::clone(&client_directory),           // Shared client directory
+    ));
 
     // Run all tasks concurrently
-    tokio::try_join!(server_task, dos_task, sync_task)?;
+    tokio::try_join!(server_task, dos_task, sync_task,jsons_task)?;
 
     Ok(())
 }
@@ -787,11 +792,49 @@ fn is_leader() -> bool {
 }
 
 
-const MAX_UDP_PAYLOAD: usize = 1024; // Maximum safe size for UDP payloads
+const MAX_UDP_PAYLOAD: usize = 4096; // Maximum safe size for UDP payloads
 
-/// Sends updates to all peers in smaller chunks if necessary.
-async fn send_update_to_peers(peers: &[&str], socket: &Arc<UdpSocket>, file_name: &str, data: &str) {
-    let data_bytes = data.as_bytes();
+// /// Sends updates to all peers in smaller chunks if necessary.
+// async fn send_update_to_peers(peers: &[&str], socket: &Arc<UdpSocket>, file_name: &str, data: &str) {
+//     let data_bytes = data.as_bytes();
+//     let data_len = data_bytes.len();
+//     let chunks = (data_len + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD; // Calculate number of chunks
+
+//     for peer in peers {
+//         for chunk_id in 0..chunks {
+//             let start = chunk_id * MAX_UDP_PAYLOAD;
+//             let end = std::cmp::min(start + MAX_UDP_PAYLOAD, data_len);
+//             let chunk_data = &data_bytes[start..end];
+
+//             let chunk_message = json!({
+//                 "type": "update",
+//                 "file": file_name,
+//                 "chunk_id": chunk_id,
+//                 "total_chunks": chunks,
+//                 "data": base64::encode(chunk_data)
+//             })
+//             .to_string();
+
+//             if let Err(err) = socket.send_to(chunk_message.as_bytes(), peer).await {
+//                 eprintln!("Failed to send {} chunk {} to {}: {}", file_name, chunk_id, peer, err);
+//             } else {
+//                 println!("Sent {} chunk {} to {}", file_name, chunk_id, peer);
+//             }
+//         }
+//     }
+// }
+async fn send_update_to_peers(
+    peers: &[&str],
+    socket: &Arc<UdpSocket>,
+    file_name: &str,
+    data: &str,
+) {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(data.as_bytes()).expect("Compression failed");
+    let compressed_data = encoder.finish().expect("Failed to finish compression");
+    let compressed_base64 = base64::encode(&compressed_data);
+
+    let data_bytes = compressed_base64.as_bytes();
     let data_len = data_bytes.len();
     let chunks = (data_len + MAX_UDP_PAYLOAD - 1) / MAX_UDP_PAYLOAD; // Calculate number of chunks
 
@@ -806,12 +849,15 @@ async fn send_update_to_peers(peers: &[&str], socket: &Arc<UdpSocket>, file_name
                 "file": file_name,
                 "chunk_id": chunk_id,
                 "total_chunks": chunks,
-                "data": base64::encode(chunk_data)
+                "data": String::from_utf8_lossy(chunk_data)
             })
             .to_string();
 
             if let Err(err) = socket.send_to(chunk_message.as_bytes(), peer).await {
-                eprintln!("Failed to send {} chunk {} to {}: {}", file_name, chunk_id, peer, err);
+                eprintln!(
+                    "Failed to send {} chunk {} to {}: {}",
+                    file_name, chunk_id, peer, err
+                );
             } else {
                 println!("Sent {} chunk {} to {}", file_name, chunk_id, peer);
             }
@@ -827,83 +873,92 @@ async fn periodic_synchronize(
     loop {
         let dir_data = serde_json::to_string(&*directory.lock().unwrap()).unwrap_or_default();
         let client_data = serde_json::to_string(&*client_directory.lock().unwrap()).unwrap_or_default();
-
-        send_update_to_peers(&peers, &socket, "directory.json", &dir_data).await;
+        
+            
+                if is_leader() {
+                    send_update_to_peers(&peers, &socket, "directory.json", &dir_data).await;
         send_update_to_peers(&peers, &socket, "clients.json", &client_data).await;
 
         tokio::time::sleep(Duration::from_secs(10)).await;
-    }
+                   
+                } else {
+                    println!("Not the leader. Waiting for leadership...");
+                    sleep(Duration::from_secs(5)).await;
+                }
+            
+        }
+
+        
+    
 }
 
 type ChunkBuffer = Arc<new_Mutex<HashMap<String, HashMap<usize, Option<String>>>>>;
 async fn synchronize_files(socket: Arc<UdpSocket>, chunk_buffer: ChunkBuffer) {
-    let mut buffer = [0; 1024];
+    let mut buffer = [0; 4096]; // Maximum UDP payload size
 
     loop {
         match socket.recv_from(&mut buffer).await {
             Ok((len, addr)) => {
                 let message = String::from_utf8_lossy(&buffer[..len]);
-                match serde_json::from_str::<serde_json::Value>(&message) {
+                match serde_json::from_str::<Value>(&message) {
                     Ok(sync_data) => {
-                        if let Some(file) = sync_data["file"].as_str() {
-                            let chunk_index = sync_data["chunk"].as_u64().unwrap_or(0) as usize;
-                            let total_chunks = sync_data["total_chunks"].as_u64().unwrap_or(1) as usize;
-                            let chunk_data = sync_data["data"].as_str().unwrap_or("").to_string();
-
+                        if let (Some(file), Some(chunk_id), Some(total_chunks), Some(chunk_data)) = (
+                            sync_data["file"].as_str(),
+                            sync_data["chunk_id"].as_u64(),
+                            sync_data["total_chunks"].as_u64(),
+                            sync_data["data"].as_str(),
+                        ) {
                             let mut buffer = chunk_buffer.lock().await;
 
-                            // Initialize the buffer for this file if it doesn't exist
                             let file_chunks = buffer
                                 .entry(file.to_string())
                                 .or_insert_with(HashMap::new);
 
-                            // Insert the received chunk
-                            file_chunks.insert(chunk_index, Some(chunk_data));
+                            file_chunks.insert(chunk_id as usize, Some(chunk_data.to_string()));
 
                             // Check if all chunks are received
-                            if file_chunks.len() == total_chunks
-                                && file_chunks.values().all(|chunk| chunk.is_some())
+                            if file_chunks.len() == total_chunks as usize
+                                && (0..total_chunks).all(|i| file_chunks.contains_key(&(i as usize)))
                             {
-                                let complete_data: String = file_chunks
+                                let complete_base64: String = file_chunks
                                     .iter()
                                     .sorted_by_key(|&(index, _)| index)
                                     .filter_map(|(_, chunk)| chunk.clone())
                                     .collect();
 
+                                let compressed_data =
+                                    base64::decode(&complete_base64).expect("Base64 decoding failed");
+                                let mut decoder = GzDecoder::new(&compressed_data[..]);
+                                let mut decompressed_data = String::new();
+                                decoder
+                                    .read_to_string(&mut decompressed_data)
+                                    .expect("Decompression failed");
+
                                 println!("Received complete file: {}", file);
 
-                                // Process the complete file
                                 match file {
                                     "directory.json" => {
-                                        if let Ok(dir_clients) = serde_json::from_str::<HashMap<String, Vec<String>>>(&complete_data) {
-                                            let mut dir = Directory::new();
-                                            dir.clients = dir_clients;
-                                            dir.save_to_file("directory.json");
-                                            println!("Synchronized directory.json from {}", addr);
-                                        } else {
-                                            eprintln!("Failed to parse directory.json data");
-                                        }
+                                        println!("Processing directory.json...");
+                                        // Process the decompressed directory.json
                                     }
                                     "clients.json" => {
-                                        if let Ok(client_data) = serde_json::from_str::<HashMap<String, ClientInfo>>(&complete_data) {
-                                            let mut client_dir = ClientDirectory::new();
-                                            client_dir.clients = client_data;
-                                            client_dir.save_to_file("clients.json");
-                                            println!("Synchronized clients.json from {}", addr);
-                                        } else {
-                                            eprintln!("Failed to parse clients.json data");
-                                        }
+                                        println!("Processing clients.json...");
+                                        // Process the decompressed clients.json
                                     }
-                                    _ => {
-                                        eprintln!("Unknown file type received: {}", file);
-                                    }
+                                    _ => eprintln!("Unknown file type received: {}", file),
                                 }
 
-                                // Clear the buffer for this file after processing
-                                buffer.remove(file);
+                                buffer.remove(file); // Remove entry after processing
+                            } else {
+                                println!(
+                                    "Waiting for more chunks for file: {}. Received: {}/{}",
+                                    file,
+                                    file_chunks.len(),
+                                    total_chunks
+                                );
                             }
                         } else {
-                            eprintln!("Missing 'file' field in sync data: {}", message);
+                            eprintln!("Invalid or incomplete sync data: {}", message);
                         }
                     }
                     Err(err) => {
@@ -920,6 +975,73 @@ async fn synchronize_files(socket: Arc<UdpSocket>, chunk_buffer: ChunkBuffer) {
         }
     }
 }
+
+
+// async fn synchronize_files(socket: Arc<UdpSocket>, chunk_buffer: ChunkBuffer) {
+//     let mut buffer = [0; 4096]; // Increased buffer size
+
+//     loop {
+//         match socket.recv_from(&mut buffer).await {
+//             Ok((len, addr)) => {
+//                 let message = String::from_utf8_lossy(&buffer[..len]);
+//                 match serde_json::from_str::<serde_json::Value>(&message) {
+//                     Ok(sync_data) => {
+//                         if let (Some(file), Some(chunk_index), Some(total_chunks), Some(chunk_data)) =
+//                             (
+//                                 sync_data["file"].as_str(),
+//                                 sync_data["chunk"].as_u64(),
+//                                 sync_data["total_chunks"].as_u64(),
+//                                 sync_data["data"].as_str(),
+//                             )
+//                         {
+//                             let mut buffer = chunk_buffer.lock().await;
+
+//                             let file_chunks = buffer
+//                                 .entry(file.to_string())
+//                                 .or_insert_with(HashMap::new);
+
+//                             file_chunks.insert(chunk_index as usize, Some(chunk_data.to_string()));
+
+//                             if file_chunks.len() == total_chunks as usize
+//                                 && (0..total_chunks).all(|i| file_chunks.contains_key(&(i as usize)))
+//                             {
+//                                 let complete_data: String = file_chunks
+//                                     .iter()
+//                                     .sorted_by_key(|&(index, _)| index)
+//                                     .filter_map(|(_, chunk)| chunk.clone())
+//                                     .collect();
+
+//                                 println!("Received complete file: {}", file);
+
+//                                 match file {
+//                                     "directory.json" => { /* Process directory.json */ }
+//                                     "clients.json" => { /* Process clients.json */ }
+//                                     _ => eprintln!("Unknown file type received: {}", file),
+//                                 }
+
+//                                 buffer.remove(file);
+//                             } else {
+//                                 println!("Waiting for more chunks for file: {}", file);
+//                             }
+//                         } else {
+//                             eprintln!("Invalid or incomplete sync data: {}", message);
+//                         }
+//                     }
+//                     Err(err) => {
+//                         eprintln!(
+//                             "Failed to parse synchronization message from {}: {}. Error: {}",
+//                             addr, message, err
+//                         );
+//                     }
+//                 }
+//             }
+//             Err(err) => {
+//                 eprintln!("Error receiving data on synchronization socket: {}", err);
+//             }
+//         }
+//     }
+// }
+
 
 
 async fn send_encoded_image(socket: Arc<UdpSocket>, dest: std::net::SocketAddr) -> tokio::io::Result<()> {
