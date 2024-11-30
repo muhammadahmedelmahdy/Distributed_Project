@@ -174,8 +174,24 @@ async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn
                 if let Ok(response_body) = serde_json::from_str::<serde_json::Value>(&response_text) {
                     if let Some(message) = response_body.get("message") {
                         println!("{}", message);
-                        // Return the details
-                        return Ok((dos_address, client_id, password));
+
+                        // Fetch the local IP address
+                        let local_ip = get_local_ip().await?;
+                        println!("Updating client IP to: {}", local_ip);
+
+                        // Update the IP address on the server
+                        let update_response = update_client_ip(&dos_address, &client_id, &local_ip.to_string()).await;
+                        match update_response {
+                            Ok(response) => {
+                                println!("IP updated successfully: {}", response);
+                                // Return the details
+                                return Ok((dos_address, client_id, password));
+                            }
+                            Err(err) => {
+                                eprintln!("Failed to update IP: {}", err);
+                                return Err("Failed to update IP after login.".into());
+                            }
+                        }
                     } else {
                         println!("Login successful, but no message received.");
                         return Err("No message received in response.".into());
@@ -209,6 +225,7 @@ async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn
         return Err("DOS port was not determined. Exiting...".into());
     }
 }
+
 
 
 
