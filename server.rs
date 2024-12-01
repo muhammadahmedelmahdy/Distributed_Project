@@ -314,145 +314,60 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     });
     
 
-    // let add_image = warp::path("add_image")
-    // .and(warp::post())
-    // .and(warp::body::json())
-    // .and(with_directory(directory.clone()))
-    // .and(with_client_directory(client_directory.clone()))
-    // .and(with_notifier(notifier_tx.clone()))
-    // .map(|body: HashMap<String, String>, dir: SharedDirectory, client_dir: SharedClientDirectory, notifier: broadcast::Sender<String>| {
-    //     let client_id = body.get("client_id").unwrap();
-    //     let password = body.get("password").unwrap();
-    //     let image_name = body.get("image_name").unwrap();
-    //     let image_data = body.get("image_data").unwrap();
-    //     let access_users: Vec<String> = match body.get("access_users") {
-    //         Some(users) => serde_json::from_str(users).unwrap_or_else(|_| Vec::new()), // Deserialize JSON array or default to empty
-    //         None => Vec::new(), // Default to empty if not provided
-    //     };
-
-    //     // Authenticate the client
-    //     let client_dir = client_dir.lock().unwrap();
-    //     if let Some(client_info) = client_dir.clients.get(client_id) {
-    //         if client_info.password != *password {
-    //             return warp::reply::json(&json!({
-    //                 "error": "Authentication failed"
-    //             }));
-    //         }
-    //     } else {
-    //         return warp::reply::json(&json!({
-    //             "error": "Client ID not found"
-    //         }));
-    //     }
-
-    //     // Add the image to the directory
-    //     let mut dir = dir.lock().unwrap();
-    //     let images = dir.clients.entry(client_id.clone()).or_insert_with(Vec::new);
-    //     images.push(
-    //         json!({
-    //             "name": image_name,
-    //             "data": image_data,
-    //             "access_users": access_users // Include the new field
-    //         })
-    //         .to_string(),
-    //     );
-
-    //     dir.save_to_file("directory.json");
-    //     let notification = format!("Client {} added image {}", client_id, image_name);
-    //     let _ = notifier.send(notification.clone());
-
-    //     warp::reply::json(&notification)
-    // });
+    
     let add_image = warp::path("add_image")
-        .and(warp::post())
-        .and(warp::body::json())
-        .and(with_notifier(notifier_tx.clone()))
-        .map(|body: HashMap<String, String>, notifier: broadcast::Sender<String>| {
-            let mut directory = Directory::load_from_file("directory.json");
-            let client_directory = ClientDirectory::load_from_file("clients.json");
+    .and(warp::post())
+    .and(warp::body::json())
+    .and(with_notifier(notifier_tx.clone()))
+    .map(|body: HashMap<String, serde_json::Value>, notifier: broadcast::Sender<String>| {
+        let mut directory = Directory::load_from_file("directory.json");
+        let client_directory = ClientDirectory::load_from_file("clients.json");
 
-            let client_id = body.get("client_id").unwrap();
-            let password = body.get("password").unwrap();
-            let image_name = body.get("image_name").unwrap();
-            let image_data = body.get("image_data").unwrap();
-            let access_users: Vec<String> = match body.get("access_users") {
-                Some(users) => serde_json::from_str(users).unwrap_or_else(|_| Vec::new()),
-                None => Vec::new(),
-            };
+        // Extract and validate required fields
+        let client_id = body.get("client_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let password = body.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+        let image_name = body.get("image_name").and_then(|v| v.as_str()).unwrap_or_default();
+        let image_data = body.get("image_data").and_then(|v| v.as_str()).unwrap_or_default();
 
-            if let Some(client_info) = client_directory.clients.get(client_id) {
-                if client_info.password != *password {
-                    return warp::reply::json(&json!({ "error": "Authentication failed" }));
-                }
-            } else {
-                return warp::reply::json(&json!({ "error": "Client ID not found" }));
+        // Extract access_users as a map (client_id -> allowed views)
+        let access_users: HashMap<String, u32> = match body.get("access_users") {
+            Some(users) => serde_json::from_value(users.clone()).unwrap_or_else(|_| HashMap::new()),
+            None => HashMap::new(),
+        };
+
+        // Authenticate client
+        if let Some(client_info) = client_directory.clients.get(client_id) {
+            if client_info.password != password {
+                return warp::reply::json(&json!({ "error": "Authentication failed" }));
             }
+        } else {
+            return warp::reply::json(&json!({ "error": "Client ID not found" }));
+        }
 
-            let images = directory.clients.entry(client_id.clone()).or_insert_with(Vec::new);
-            images.push(
-                json!({
-                    "name": image_name,
-                    "data": image_data,
-                    "access_users": access_users
-                })
-                .to_string(),
-            );
+        // Add image to directory
+        let images = directory.clients.entry(client_id.to_string()).or_insert_with(Vec::new);
+        images.push(
+            json!({
+                "name": image_name,
+                "data": image_data,
+                "access_users": access_users
+            })
+            .to_string(),
+        );
 
-            directory.save_to_file("directory.json");
-            let notification = format!("Client {} added image {}", client_id, image_name);
-            let _ = notifier.send(notification.clone());
+        // Save updated directory to file
+        directory.save_to_file("directory.json");
 
-            warp::reply::json(&notification)
-        });
+        // Send notification
+        let notification = format!("Client {} added image {}", client_id, image_name);
+        let _ = notifier.send(notification.clone());
+
+        warp::reply::json(&notification)
+    });
 
 
-    // let delete_image = warp::path("delete_image")
-    // .and(warp::post())
-    // .and(warp::body::json())
-    // .and(with_directory(directory.clone()))
-    // .and(with_client_directory(client_directory.clone()))
-    // .and(with_notifier(notifier_tx.clone()))
-    // .map(|body: HashMap<String, String>, dir: SharedDirectory, client_dir: SharedClientDirectory, notifier: broadcast::Sender<String>| {
-    //     let client_id = body.get("client_id").unwrap();
-    //     let password = body.get("password").unwrap();
-    //     let image_name = body.get("image_name").unwrap();
 
-    //     // Authenticate the client
-    //     let client_dir = client_dir.lock().unwrap();
-    //     if let Some(client_info) = client_dir.clients.get(client_id) {
-    //         if client_info.password != *password {
-    //             return warp::reply::json(&json!({
-    //                 "error": "Authentication failed"
-    //             }));
-    //         }
-    //     } else {
-    //         return warp::reply::json(&json!({
-    //             "error": "Client ID not found"
-    //         }));
-    //     }
-
-    //     // Delete the image from the directory
-    //     let mut dir = dir.lock().unwrap();
-    //     if let Some(images) = dir.clients.get_mut(client_id) {
-    //         if let Some(pos) = images.iter().position(|img| {
-    //             let image_data: serde_json::Value = serde_json::from_str(img).unwrap();
-    //             image_data["name"] == *image_name
-    //         }) {
-    //             images.remove(pos);
-    //             dir.save_to_file("directory.json");
-    //             let notification = json!({
-    //                 "message": format!("Client {} deleted image {}", client_id, image_name),
-    //                 "client_id": client_id,
-    //                 "image_name": image_name
-    //             });
-    //             let _ = notifier.send(notification.to_string());
-    //             return warp::reply::json(&notification);
-    //         }
-    //     }
-
-    //     warp::reply::json(&json!({
-    //         "error": format!("Image {} not found for client {}", image_name, client_id)
-    //     }))
-    // });
+    
     let delete_image = warp::path("delete_image")
         .and(warp::post())
         .and(warp::body::json())
@@ -497,49 +412,7 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
 
 
 
-    // let list_all = warp::path("list_all")
-    // .and(warp::get())
-    // .and(with_directory(directory.clone()))
-    // .map(|dir: SharedDirectory| {
-    //     let dir = dir.lock().unwrap();
-
-    //     // Collect all images along with their respective client IDs
-    //     let mut all_images = Vec::new();
-    //     for (client_id, images) in &dir.clients {
-    //         for image in images {
-    //             if let Ok(mut image_data) = serde_json::from_str::<serde_json::Value>(image) {
-    //                 image_data["client_id"] = serde_json::Value::String(client_id.clone());
-    //                 all_images.push(image_data.to_string());
-    //             }
-    //         }
-    //     }
-
-    //     match create_composite_image(&all_images) {
-    //         Ok(composite_image) => {
-    //             let mut buffer = Cursor::new(Vec::new());
-    //             if composite_image
-    //                 .write_to(&mut buffer, ImageOutputFormat::Png)
-    //                 .is_err()
-    //             {
-    //                 return warp::http::Response::builder()
-    //                     .status(500)
-    //                     .header("Content-Type", "text/plain")
-    //                     .body("Failed to encode composite image".to_string().into_bytes())
-    //                     .unwrap();
-    //             }
-
-    //             warp::http::Response::builder()
-    //                 .header("Content-Type", "image/png")
-    //                 .body(buffer.into_inner())
-    //                 .unwrap()
-    //         }
-    //         Err(e) => warp::http::Response::builder()
-    //             .status(500)
-    //             .header("Content-Type", "text/plain")
-    //             .body(format!("Failed to create composite image: {}", e).into_bytes())
-    //             .unwrap(),
-    //     }
-    // });
+    
     let list_all = warp::path("list_all")
         .and(warp::get())
         .map(|| {
@@ -580,62 +453,7 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
             }
         });
 
-    // let list_by_client = warp::path("list_by_client")
-    // .and(warp::get())
-    // .and(warp::query::<HashMap<String, String>>())
-    // .and(with_directory(directory.clone()))
-    // .map(|query: HashMap<String, String>, dir: SharedDirectory| {
-    //     let default_client_id = String::new();
-    //     let client_id = query.get("client_id").unwrap_or(&default_client_id);
-
-    //     let dir = dir.lock().unwrap();
-
-    //     let images = match dir.clients.get(client_id) {
-    //         Some(images) => {
-    //             let mut client_images = Vec::new();
-    //             for image in images {
-    //                 if let Ok(mut image_data) = serde_json::from_str::<serde_json::Value>(image) {
-    //                     image_data["client_id"] = serde_json::Value::String(client_id.clone());
-    //                     client_images.push(image_data.to_string());
-    //                 }
-    //             }
-    //             client_images
-    //         }
-    //         None => {
-    //             return warp::http::Response::builder()
-    //                 .status(404)
-    //                 .header("Content-Type", "text/plain")
-    //                 .body("No images found".to_string().into_bytes())
-    //                 .unwrap();
-    //         }
-    //     };
-
-    //     match create_composite_image(&images) {
-    //         Ok(composite_image) => {
-    //             let mut buffer = Cursor::new(Vec::new());
-    //             if composite_image
-    //                 .write_to(&mut buffer, ImageOutputFormat::Png)
-    //                 .is_err()
-    //             {
-    //                 return warp::http::Response::builder()
-    //                     .status(500)
-    //                     .header("Content-Type", "text/plain")
-    //                     .body("Failed to encode composite image".to_string().into_bytes())
-    //                     .unwrap();
-    //             }
-
-    //             warp::http::Response::builder()
-    //                 .header("Content-Type", "image/png")
-    //                 .body(buffer.into_inner())
-    //                 .unwrap()
-    //         }
-    //         Err(e) => warp::http::Response::builder()
-    //             .status(500)
-    //             .header("Content-Type", "text/plain")
-    //             .body(format!("Failed to create composite image: {}", e).into_bytes())
-    //             .unwrap(),
-    //     }
-    // });
+    
     let list_by_client = warp::path("list_by_client")
     .and(warp::get())
     .and(warp::query::<HashMap<String, String>>())
@@ -692,22 +510,7 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
         }
     });
 
-        // let fetch_clients = warp::path("fetch_clients")
-        // .and(warp::get())
-        // .and(with_client_directory(client_directory.clone()))
-        // .map(|client_dir: SharedClientDirectory| {
-        //     let client_dir = client_dir.lock().unwrap();
-
-        //     let clients_with_ips: HashMap<String, Option<String>> = client_dir
-        //         .clients
-        //         .iter()
-        //         .map(|(client_id, client_info)| {
-        //             (client_id.clone(), client_info.current_ip.clone())
-        //         })
-        //         .collect();
-
-        //     warp::reply::json(&clients_with_ips)
-        // });
+      
         let fetch_clients = warp::path("fetch_clients")
     .and(warp::get())
     .map(|| {
@@ -725,48 +528,7 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     });
 
 
-    //     let login = warp::path("login")
-    // .and(warp::post())
-    // .and(warp::body::json())
-    // .and(with_client_directory(client_directory.clone()))
-    // .map(|body: HashMap<String, String>, client_dir: SharedClientDirectory| {
-    //     // Extract client_id and password from the request body
-    //     let default_client_id = String::new();
-    //     let client_id = body.get("client_id").unwrap_or(&default_client_id);
-
-    //     let default_password = String::new();
-    //     let password = body.get("password").unwrap_or(&default_password);
-
-    //     // Lock the client directory for thread-safe access
-    //     let client_dir = client_dir.lock().unwrap();
-
-    //     // Check if the client exists and validate the password
-    //     if let Some(client_info) = client_dir.clients.get(client_id) {
-    //         if &client_info.password == password {
-    //             warp::reply::with_status(
-    //                 warp::reply::json(&json!({
-    //                     "message": "Login successful",
-    //                     "client_id": client_id
-    //                 })),
-    //                 warp::http::StatusCode::OK,
-    //             )
-    //         } else {
-    //             warp::reply::with_status(
-    //                 warp::reply::json(&json!({
-    //                     "error": "Invalid password"
-    //                 })),
-    //                 warp::http::StatusCode::UNAUTHORIZED,
-    //             )
-    //         }
-    //     } else {
-    //         warp::reply::with_status(
-    //             warp::reply::json(&json!({
-    //                 "error": "Client ID not found"
-    //             })),
-    //             warp::http::StatusCode::NOT_FOUND,
-    //         )
-    //     }
-    // });
+    
     let login = warp::path("login")
     .and(warp::post())
     .and(warp::body::json())
@@ -809,46 +571,7 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
         }
     });
 
-        // // Register a new client
-        // let register_client = warp::path("register_client")
-        // .and(warp::post())
-        // .and(warp::body::json())
-        // .and(with_client_directory(client_directory.clone()))
-        // .and(with_directory(directory.clone())) // Include the directory for updating
-        // .map(
-        //     |body: HashMap<String, String>, client_dir: SharedClientDirectory, dir: SharedDirectory| {
-        //         let client_id = body.get("id").unwrap().to_string();
-        //         let password = body.get("password").unwrap().to_string();
-
-        //         let mut client_dir = client_dir.lock().unwrap();
-        //         let mut dir = dir.lock().unwrap(); // Lock directory for modification
-
-        //         // Check if client already exists
-        //         if client_dir.clients.contains_key(&client_id) {
-        //             return warp::reply::json(&json!({
-        //                 "error": "Client ID already exists"
-        //             }));
-        //         }
-
-        //         // Add the client to clients.json
-        //         let client_info = ClientInfo {
-        //             id: client_id.clone(),
-        //             password,
-        //             current_ip: None,
-        //         };
-        //         client_dir.clients.insert(client_id.clone(), client_info);
-        //         client_dir.save_to_file("clients.json");
-
-        //         // Add the client to directory.json
-        //         dir.clients.entry(client_id.clone()).or_insert_with(Vec::new);
-        //         dir.save_to_file("directory.json");
-
-        //         warp::reply::json(&json!({
-        //             "message": "Client registered successfully",
-        //             "client_id": client_id
-        //         }))
-        //     },
-        // );
+       
         let register_client = warp::path("register_client")
     .and(warp::post())
     .and(warp::body::json())
@@ -887,32 +610,7 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     });
 
 
-// Update client's current IP
-// let update_ip = warp::path("update_ip")
-//     .and(warp::post())
-//     .and(warp::body::json())
-//     .and(with_client_directory(client_directory.clone()))
-//     .map(|body: HashMap<String, String>, client_dir: SharedClientDirectory| {
-//         let client_id = body.get("id").unwrap();
-//         let new_ip = body.get("current_ip").unwrap();
 
-//         let mut dir = client_dir.lock().unwrap();
-
-//         if let Some(client) = dir.clients.get_mut(client_id) {
-//             client.current_ip = Some(new_ip.clone());
-//             dir.save_to_file("clients.json");
-
-//             return warp::reply::json(&json!({
-//                 "message": "IP updated successfully",
-//                 "client_id": client_id,
-//                 "current_ip": new_ip
-//             }));
-//         }
-
-//         warp::reply::json(&json!({
-//             "error": "Client ID not found"
-//         }))
-//     });
 let update_ip = warp::path("update_ip")
     .and(warp::post())
     .and(warp::body::json())
@@ -939,6 +637,245 @@ let update_ip = warp::path("update_ip")
             "error": "Client ID not found"
         }))
     });
+    let remove_access = warp::path("remove_access")
+    .and(warp::post())
+    .and(warp::body::json())
+    .map(|body: HashMap<String, serde_json::Value>| {
+        // Extract required fields
+        let client_id = body.get("client_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let password = body.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+        let image_name = body.get("image_name").and_then(|v| v.as_str()).unwrap_or_default();
+        let users_to_remove: Vec<String> = match body.get("users_to_remove") {
+            Some(users) => serde_json::from_value(users.clone()).unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        // Load directories
+        let mut directory = Directory::load_from_file("directory.json");
+        let client_directory = ClientDirectory::load_from_file("clients.json");
+
+        // Authenticate client
+        if let Some(client_info) = client_directory.clients.get(client_id) {
+            if client_info.password != password {
+                return warp::reply::json(&json!({ "error": "Authentication failed" }));
+            }
+        } else {
+            return warp::reply::json(&json!({ "error": "Client ID not found" }));
+        }
+
+        // Find the image
+        if let Some(images) = directory.clients.get_mut(client_id) {
+            if let Some(image_entry) = images.iter_mut().find(|img| {
+                let image_data: serde_json::Value = serde_json::from_str(img).unwrap_or_default();
+                image_data["name"] == image_name
+            }) {
+                let mut image_data: serde_json::Value = serde_json::from_str(image_entry).unwrap();
+
+                // Remove users from access list
+                if let Some(access_users) = image_data.get_mut("access_users").and_then(|v| v.as_object_mut()) {
+                    for user in users_to_remove {
+                        access_users.remove(&user);
+                    }
+                }
+
+                *image_entry = serde_json::to_string(&image_data).unwrap();
+                directory.save_to_file("directory.json");
+
+                return warp::reply::json(&json!({
+                    "message": "Users removed successfully from access list",
+                    "client_id": client_id,
+                    "image_name": image_name
+                }));
+            }
+        }
+
+        warp::reply::json(&json!({
+            "error": format!("Image '{}' not found for client '{}'", image_name, client_id)
+        }))
+    });
+
+
+    let modify_access = warp::path("modify_access")
+    .and(warp::post())
+    .and(warp::body::json())
+    .map(|body: HashMap<String, serde_json::Value>| {
+        // Extract required fields
+        let client_id = body.get("client_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let password = body.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+        let image_name = body.get("image_name").and_then(|v| v.as_str()).unwrap_or_default();
+        let access_rights: HashMap<String, u32> = match body.get("access_rights") {
+            Some(rights) => serde_json::from_value(rights.clone()).unwrap_or_default(),
+            None => HashMap::new(),
+        };
+
+        // Load directories
+        let mut directory = Directory::load_from_file("directory.json");
+        let client_directory = ClientDirectory::load_from_file("clients.json");
+
+        // Authenticate client
+        if let Some(client_info) = client_directory.clients.get(client_id) {
+            if client_info.password != password {
+                return warp::reply::json(&json!({ "error": "Authentication failed" }));
+            }
+        } else {
+            return warp::reply::json(&json!({ "error": "Client ID not found" }));
+        }
+
+        // Find the image
+        if let Some(images) = directory.clients.get_mut(client_id) {
+            if let Some(image_entry) = images.iter_mut().find(|img| {
+                let image_data: serde_json::Value = serde_json::from_str(img).unwrap_or_default();
+                image_data["name"] == image_name
+            }) {
+                let mut image_data: serde_json::Value = serde_json::from_str(image_entry).unwrap();
+
+                // Update or initialize access rights
+                if let Some(existing_access) = image_data.get_mut("access_users").and_then(|v| v.as_object_mut()) {
+                    // Add or update the provided access rights
+                    for (other_client, allowed_views) in access_rights {
+                        existing_access.insert(other_client, serde_json::Value::from(allowed_views));
+                    }
+                } else {
+                    // Initialize access_users if it doesn't exist
+                    let new_access: serde_json::Map<String, serde_json::Value> = access_rights
+                        .into_iter()
+                        .map(|(client, views)| (client, serde_json::Value::from(views)))
+                        .collect();
+                    image_data["access_users"] = serde_json::Value::Object(new_access);
+                }
+
+                // Save the updated image metadata
+                *image_entry = serde_json::to_string(&image_data).unwrap();
+                directory.save_to_file("directory.json");
+
+                return warp::reply::json(&json!({
+                    "message": "Access rights updated successfully",
+                    "client_id": client_id,
+                    "image_name": image_name
+                }));
+            }
+        }
+
+        warp::reply::json(&json!({
+            "error": format!("Image '{}' not found for client '{}'", image_name, client_id)
+        }))
+    });
+
+    let edit_views = warp::path("edit_views")
+    .and(warp::post())
+    .and(warp::body::json())
+    .map(|body: HashMap<String, serde_json::Value>| {
+        // Extract required fields
+        let client_id = body.get("client_id").and_then(|v| v.as_str()).unwrap_or_default();
+        let password = body.get("password").and_then(|v| v.as_str()).unwrap_or_default();
+        let image_name = body.get("image_name").and_then(|v| v.as_str()).unwrap_or_default();
+        let new_views: HashMap<String, u32> = match body.get("new_views") {
+            Some(views) => serde_json::from_value(views.clone()).unwrap_or_default(),
+            None => HashMap::new(),
+        };
+
+        // Load directories
+        let mut directory = Directory::load_from_file("directory.json");
+        let client_directory = ClientDirectory::load_from_file("clients.json");
+
+        // Authenticate client
+        if let Some(client_info) = client_directory.clients.get(client_id) {
+            if client_info.password != password {
+                return warp::reply::json(&json!({ "error": "Authentication failed" }));
+            }
+        } else {
+            return warp::reply::json(&json!({ "error": "Client ID not found" }));
+        }
+
+        // Find the image
+        if let Some(images) = directory.clients.get_mut(client_id) {
+            if let Some(image_entry) = images.iter_mut().find(|img| {
+                let image_data: serde_json::Value = serde_json::from_str(img).unwrap_or_default();
+                image_data["name"] == image_name
+            }) {
+                let mut image_data: serde_json::Value = serde_json::from_str(image_entry).unwrap();
+
+                // Update views for existing users
+                if let Some(access_users) = image_data.get_mut("access_users").and_then(|v| v.as_object_mut()) {
+                    for (user, views) in new_views {
+                        if access_users.contains_key(&user) {
+                            access_users.insert(user, serde_json::Value::from(views));
+                        }
+                    }
+                }
+
+                *image_entry = serde_json::to_string(&image_data).unwrap();
+                directory.save_to_file("directory.json");
+
+                return warp::reply::json(&json!({
+                    "message": "Number of views updated successfully",
+                    "client_id": client_id,
+                    "image_name": image_name
+                }));
+            }
+        }
+
+        warp::reply::json(&json!({
+            "error": format!("Image '{}' not found for client '{}'", image_name, client_id)
+        }))
+    });
+    let get_access = warp::path("get_access")
+    .and(warp::get())
+    .and(warp::query::<HashMap<String, String>>())
+    .map(|query: HashMap<String, String>| {
+        // Create persistent bindings for default values
+        let default_client_id = String::new();
+        let default_password = String::new();
+        let default_image_name = String::new();
+
+        // Extract required fields from the query parameters
+        let client_id = query.get("client_id").unwrap_or(&default_client_id);
+        let password = query.get("password").unwrap_or(&default_password);
+        let image_name = query.get("image_name").unwrap_or(&default_image_name);
+
+        // Load directories
+        let directory = Directory::load_from_file("directory.json");
+        let client_directory = ClientDirectory::load_from_file("clients.json");
+
+        // Authenticate client
+        if let Some(client_info) = client_directory.clients.get(client_id) {
+            if client_info.password != *password {
+                return warp::reply::json(&json!({ "error": "Authentication failed" }));
+            }
+        } else {
+            return warp::reply::json(&json!({ "error": "Client ID not found" }));
+        }
+
+        // Find the image and return its access rights
+        if let Some(images) = directory.clients.get(client_id) {
+            if let Some(image_entry) = images.iter().find(|img| {
+                let image_data: serde_json::Value = serde_json::from_str(img).unwrap_or_default();
+                image_data["name"] == *image_name
+            }) {
+                let image_data: serde_json::Value = serde_json::from_str(image_entry).unwrap();
+                if let Some(access_rights) = image_data.get("access_users") {
+                    return warp::reply::json(&json!({
+                        "access_rights": access_rights,
+                        "client_id": client_id,
+                        "image_name": image_name
+                    }));
+                } else {
+                    return warp::reply::json(&json!({
+                        "error": "No access rights found for this image"
+                    }));
+                }
+            }
+        }
+
+        warp::reply::json(&json!({
+            "error": format!("Image '{}' not found for client '{}'", image_name, client_id)
+        }))
+    });
+
+
+
+
+
 
  
     let routes = register_client
@@ -948,6 +885,10 @@ let update_ip = warp::path("update_ip")
         .or(delete_image)
         .or(list_all)
         .or(list_by_client)
+        .or(modify_access)
+        .or(edit_views)
+        .or(remove_access)
+        .or(get_access)
         .or(login);
 
     tokio::spawn(async move {

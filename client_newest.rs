@@ -337,6 +337,128 @@ async fn get_local_ip() -> Result<IpAddr, Box<dyn Error>> {
     Ok(local_addr.ip())
 }
 
+pub async fn modify_access(
+    client: &Client,
+    server_url: &str,
+    client_id: &str,
+    password: &str,
+    image_name: &str,
+    access_rights: HashMap<String, u32>,
+) -> Result<(), reqwest::Error> {
+    let body = json!({
+        "client_id": client_id,
+        "password": password,
+        "image_name": image_name,
+        "access_rights": access_rights
+    });
+
+    let response = client
+        .post(format!("{}/modify_access", server_url))
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let response_body: serde_json::Value = response.json().await?;
+
+    if status.is_success() {
+        println!("Access rights modified successfully: {:?}", response_body);
+    } else {
+        eprintln!("Failed to modify access rights: {:?}", response_body);
+    }
+
+    Ok(())
+}
+pub async fn edit_views(
+    client: &Client,
+    server_url: &str,
+    client_id: &str,
+    password: &str,
+    image_name: &str,
+    new_views: HashMap<String, u32>,
+) -> Result<(), reqwest::Error> {
+    let body = json!({
+        "client_id": client_id,
+        "password": password,
+        "image_name": image_name,
+        "new_views": new_views
+    });
+
+    let response = client
+        .post(format!("{}/edit_views", server_url))
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let response_body: serde_json::Value = response.json().await?;
+
+    if status.is_success() {
+        println!("Views updated successfully: {:?}", response_body);
+    } else {
+        eprintln!("Failed to update views: {:?}", response_body);
+    }
+
+    Ok(())
+}
+pub async fn remove_access(
+    client: &Client,
+    server_url: &str,
+    client_id: &str,
+    password: &str,
+    image_name: &str,
+    users_to_remove: Vec<String>,
+) -> Result<(), reqwest::Error> {
+    let body = json!({
+        "client_id": client_id,
+        "password": password,
+        "image_name": image_name,
+        "users_to_remove": users_to_remove
+    });
+
+    let response = client
+        .post(format!("{}/remove_access", server_url))
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let response_body: serde_json::Value = response.json().await?;
+
+    if status.is_success() {
+        println!("Users removed successfully: {:?}", response_body);
+    } else {
+        eprintln!("Failed to remove users: {:?}", response_body);
+    }
+
+    Ok(())
+}
+pub async fn get_access(
+    client: &Client,
+    server_url: &str,
+    client_id: &str,
+    password: &str,
+    image_name: &str,
+) -> Result<(), reqwest::Error> {
+    let url = format!(
+        "{}/get_access?client_id={}&password={}&image_name={}",
+        server_url, client_id, password, image_name
+    );
+
+    let response = client.get(&url).send().await?;
+
+    let status = response.status();
+    let response_body: serde_json::Value = response.json().await?;
+
+    if status.is_success() {
+        println!("Access rights retrieved: {:?}", response_body);
+    } else {
+        eprintln!("Failed to retrieve access rights: {:?}", response_body);
+    }
+
+    Ok(())
+}
+
 
 async fn request_leader(socket: &UdpSocket) -> Result<String, Box<dyn Error>> {
     let request_message = "REQUEST_LEADER";
