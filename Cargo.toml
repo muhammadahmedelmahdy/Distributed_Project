@@ -1,0 +1,27 @@
+[package]
+name = "Distributed_Project"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+sysinfo = "0.29.0"
+rand = "0.8" 
+get_if_addrs = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+steganography = "1.0.2"
+lazy_static = "1.4"
+image = "0.24.5"
+warp = "0.3"
+futures-util = "0.3"
+reqwest = { version = "0.11", features = ["json"] }
+tokio-tungstenite = "0.15"
+imageproc = "0.23.0"
+rusttype = "0.9.3"
+base64 = "0.21"
+itertools = "0.10"
+flate2 = "1.0" 
+chrono = "0.4"
+bytes = "1.1"
+hyper = "0.14"
