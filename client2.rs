@@ -16,18 +16,18 @@ use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr,  UdpSocket as StdUdpSocket};
 use std::io::{self, Write};
 use std::collections::HashMap;
-use warp::Filter;
-use bytes::Buf; // Import Buf for easier handling of bytes
+use serde_json::Value; 
 use serde_json::from_str;
-use std::convert::Infallible;
+use tokio::sync::oneshot;
 use std::net::SocketAddr;
+use std::convert::Infallible;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server, StatusCode};
-use tokio::sync::oneshot;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
-const CLIENT_ADDR: &str = "127.0.0.1:8083";
 const CHUNK_SIZE: usize = 1024;
 const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 const ACK: &[u8] = b"ACK";
@@ -36,31 +36,148 @@ const ACK: &[u8] = b"ACK";
 struct Message {
     image_name: String,
     views: i32,
+    viewer: String,
 }
+
+// #[tokio::main]
+// async fn main() -> Result<(), Box<dyn Error>> {
+
+//     let addr = SocketAddr::from(([0, 0, 0, 0], 3000)); // Listen on all interfaces
+
+//     // Create a channel to signal the HTTP server to shutdown
+//     let (tx, rx) = oneshot::channel::<()>();
+
+//     // Spawn the HTTP server as a separate task
+//     let server = Server::bind(&addr).serve(make_service_fn(|_conn| async {
+//         Ok::<_, Infallible>(service_fn(handle_request))
+//     }));
+//     let graceful = server.with_graceful_shutdown(async {
+//         rx.await.ok(); // Wait for the signal to shutdown
+//     });
+
+//     // Run the server in the background
+//     tokio::spawn(async move {
+//         if let Err(e) = graceful.await {
+//             eprintln!("Server error: {}", e);
+//         }
+//     });
+
+//     println!("Listening on http://{}", addr);
+
+//     // Proceed with the CLI operations
+//     let socket = UdpSocket::bind("0.0.0.0:0").await?;
+//     let leader_address = request_leader(&socket).await?;
+
+
+//     println!("Welcome! Choose an option:");
+//     println!("1: Register");
+//     println!("2: Login");
+
+//     let mut option = String::new();
+//     let mut dos_address = String::new();
+//     let mut client_id = String::new();
+//     let mut password = String::new();
+
+//     std::io::stdin().read_line(&mut option).expect("Failed to read line");
+
+//     match option.trim() {
+//         "1" => {
+//             let details = register_client_to_dos(&leader_address).await?;
+//             dos_address = details.0;
+//             client_id = details.1;
+//             password = details.2;
+//         },
+//         "2" => {
+
+//             match login(&leader_address).await {
+//                 Ok((returned_dos_address, returned_client_id, returned_password)) => {
+//                     dos_address = returned_dos_address;
+//                     client_id = returned_client_id;
+//                     password = returned_password;
+//                     println!("Login successful!");
+//                 }
+//                 Err(e) => {
+//                     eprintln!("Login failed: {}", e);
+//                     return Ok(()); // Exit on failed login
+//                 }
+//             }
+//         },
+//         _ => println!("Invalid option! Please try again."),  // Catch-all pattern
+//     }
+
+//     loop {
+//         println!("Choose an option:");
+//         println!("1: Add an image");
+//         println!("2: Delete an image");
+//         println!("3: View the gallery");
+//         println!("4: Exit");
+
+//         option.clear(); // Clear the previous input
+//         std::io::stdin().read_line(&mut option).expect("Failed to read line");
+
+//         match option.trim() {
+//             "1" => {
+//                 println!("Enter image path:");
+//                 let mut image_path = String::new();
+//                 std::io::stdin().read_line(&mut image_path).expect("Failed to read line");
+//                 let image_path = image_path.trim();
+//                 match add_image_to_dos(&dos_address, &client_id, &password, image_path).await {
+//                     Ok(msg) => println!("Image added successfully: {}", msg),
+//                     Err(e) => println!("Failed to add image: {}", e),
+//                 }
+//             },
+//             "2" => {
+//                 println!("Enter image name:");
+//                 let mut image_name = String::new();
+//                 std::io::stdin().read_line(&mut image_name).expect("Failed to read line");
+//                 let image_name = image_name.trim();
+//                 match delete_image_from_dos(&dos_address, &client_id, &password, image_name).await {
+//                     Ok(msg) => println!("Image deleted successfully: {}", msg),
+//                     Err(e) => println!("Failed to delete image: {}", e),
+//                 }
+//             },
+//             "3" => 
+//             {
+//                 let output_path = "composite_image.png";
+//                 match fetch_composite_image(&dos_address, output_path).await {
+//                     Ok(_) => println!("Composite image fetched and saved to {}", output_path),
+//                     Err(e) => eprintln!("Error fetching composite image: {}", e),
+//                 }
+//                 view_gallery(&leader_address).await?;
+
+//             },
+//             "4" => break,
+//             _ => println!("Invalid choice! Please select again."), 
+//         }
+//     }
+
+//     Ok(())
+// }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-
     let addr = SocketAddr::from(([0, 0, 0, 0], 3001)); // Listen on all interfaces
 
-    // Create a channel to signal the HTTP server to shutdown
-    let (tx, rx) = oneshot::channel::<()>();
+    // Shared state for dos_address, client_id, and password
+    let shared_state = Arc::new(Mutex::new((String::new(), String::new(), String::new())));
 
     // Spawn the HTTP server as a separate task
-    let server = Server::bind(&addr).serve(make_service_fn(|_conn| async {
-        Ok::<_, Infallible>(service_fn(handle_request))
-    }));
-    let graceful = server.with_graceful_shutdown(async {
-        rx.await.ok(); // Wait for the signal to shutdown
-    });
-
-    // Run the server in the background
+    let server_state = Arc::clone(&shared_state);
     tokio::spawn(async move {
-        if let Err(e) = graceful.await {
+        let server = Server::bind(&addr).serve(make_service_fn(move |_conn| {
+            let server_state = Arc::clone(&server_state); // Clone shared state for each request
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req| {
+                    handle_request(req, Arc::clone(&server_state)) // Pass shared state
+                }))
+            }
+        }));
+
+        println!("Listening on http://{}", addr);
+
+        if let Err(e) = server.await {
             eprintln!("Server error: {}", e);
         }
     });
-
-    println!("Listening on http://{}", addr);
 
     // Proceed with the CLI operations
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -69,37 +186,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Welcome! Choose an option:");
     println!("1: Register");
     println!("2: Login");
+
     let mut option = String::new();
-    let mut dos_address = String::new();
-    let mut client_id = String::new();
-    let mut password = String::new();
 
     std::io::stdin().read_line(&mut option).expect("Failed to read line");
 
     match option.trim() {
         "1" => {
             let details = register_client_to_dos(&leader_address).await?;
-            dos_address = details.0;
-            client_id = details.1;
-            password = details.2;
-        },
+            let mut state = shared_state.lock().await;
+            state.0 = details.0; // dos_address
+            state.1 = details.1; // client_id
+            state.2 = details.2; // password
+        }
         "2" => {
             match login(&leader_address).await {
                 Ok((returned_dos_address, returned_client_id, returned_password)) => {
-                    dos_address = returned_dos_address;
-                    client_id = returned_client_id;
-                    password = returned_password;
+                    let mut state = shared_state.lock().await;
+                    state.0 = returned_dos_address; // dos_address
+                    state.1 = returned_client_id;   // client_id
+                    state.2 = returned_password;    // password
                     println!("Login successful!");
                 }
                 Err(e) => {
                     eprintln!("Login failed: {}", e);
-                    tx.send(()).ok(); // Send shutdown signal to the server
                     return Ok(()); // Exit on failed login
                 }
             }
-        },
-        _ => println!("Invalid option! Please try again."),  // Catch-all pattern
+        }
+        _ => println!("Invalid option! Please try again."), // Catch-all pattern
     }
+
     loop {
         println!("Choose an option:");
         println!("1: Add an image");
@@ -116,71 +233,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let mut image_path = String::new();
                 std::io::stdin().read_line(&mut image_path).expect("Failed to read line");
                 let image_path = image_path.trim();
-                match add_image_to_dos(&dos_address, &client_id, &password, image_path).await {
+                let state = shared_state.lock().await;
+                match add_image_to_dos(&state.0, &state.1, &state.2, image_path).await {
                     Ok(msg) => println!("Image added successfully: {}", msg),
                     Err(e) => println!("Failed to add image: {}", e),
                 }
-            },
+            }
             "2" => {
                 println!("Enter image name:");
                 let mut image_name = String::new();
                 std::io::stdin().read_line(&mut image_name).expect("Failed to read line");
                 let image_name = image_name.trim();
-                match delete_image_from_dos(&dos_address, &client_id, &password, image_name).await {
+                let state = shared_state.lock().await;
+                match delete_image_from_dos(&state.0, &state.1, &state.2, image_name).await {
                     Ok(msg) => println!("Image deleted successfully: {}", msg),
                     Err(e) => println!("Failed to delete image: {}", e),
                 }
-            },
-            "3" => 
-            {
+            }
+            "3" => {
                 let output_path = "composite_image.png";
-                match fetch_composite_image(&dos_address, output_path).await {
+                let state = shared_state.lock().await;
+                match fetch_composite_image(&state.0, output_path).await {
                     Ok(_) => println!("Composite image fetched and saved to {}", output_path),
                     Err(e) => eprintln!("Error fetching composite image: {}", e),
                 }
                 view_gallery(&leader_address).await?;
-
-            },
+            }
             "4" => break,
-            _ => println!("Invalid choice! Please select again."), 
+            _ => println!("Invalid choice! Please select again."),
         }
     }
 
     Ok(())
 }
 
-async fn handle_request(req: Request<Body>) -> Result<Response<Body>, Infallible> {
-    match (req.method(), req.uri().path()) {
-        (&hyper::Method::POST, "/receive_message") => {
-            let full_body = hyper::body::to_bytes(req.into_body()).await.unwrap();
-            // Parse the body as JSON
-            match serde_json::from_slice::<Message>(&full_body) {
-                Ok(parsed_message) => {
-                    println!("Received image name: {}, views: {}", parsed_message.image_name, parsed_message.views);
-                    Ok(Response::new(Body::from("Message received")))
-                },
-                Err(e) => {
-                    eprintln!("Failed to parse JSON: {}", e);
-                    Ok(Response::new(Body::from("Invalid JSON format")))
-                }
-            }
-        },
-        _ => {
-            let mut not_found = Response::new(Body::from("Not Found"));
-            *not_found.status_mut() = StatusCode::NOT_FOUND;
-            Ok(not_found)
-        },
-    }
-}
-
-async fn send_message_to_client(client_ip: &str, image_name: &str, views: i32) -> Result<(), Box<dyn Error>> {
+async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add:&str,views: i32) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
-    let send_msg_url = format!("http://{}:3000/receive_message", client_ip);
+    let send_msg_url = format!("http://{}:3001/receive_message", client_ip);
     
     // Prepare the JSON payload
     let json_payload = json!({
         "image_name": image_name,
-        "views": views
+        "views": views,
+        "viewer": client_to_add
     });
 
     // Sending the JSON payload as part of the request
@@ -196,6 +291,96 @@ async fn send_message_to_client(client_ip: &str, image_name: &str, views: i32) -
     }
     Ok(())
 }
+
+// async fn handle_request(req: Request<Body>) -> Result<Response<Body>, Infallible> {
+//     match (req.method(), req.uri().path()) {
+//         (&hyper::Method::POST, "/receive_message") => {
+//             let full_body = hyper::body::to_bytes(req.into_body()).await.unwrap();
+//             // Parse the body as JSON
+//             match serde_json::from_slice::<Message>(&full_body) {
+//                 Ok(parsed_message) => {
+//                     println!("Received image name: {}, views: {}", parsed_message.image_name, parsed_message.views);
+//                     Ok(Response::new(Body::from("Message received")))
+//                 },
+//                 Err(e) => {
+//                     eprintln!("Failed to parse JSON: {}", e);
+//                     Ok(Response::new(Body::from("Invalid JSON format")))
+//                 }
+//             }
+//         },
+//         _ => {
+//             let mut not_found = Response::new(Body::from("Not Found"));
+//             *not_found.status_mut() = StatusCode::NOT_FOUND;
+//             Ok(not_found)
+//         },
+//     }
+// }
+async fn handle_request(
+    req: Request<Body>,
+    shared_state: Arc<Mutex<(String, String, String)>>, // Shared state
+) -> Result<Response<Body>, Infallible> {
+    match (req.method(), req.uri().path()) {
+        (&hyper::Method::POST, "/receive_message") => {
+            let full_body = hyper::body::to_bytes(req.into_body()).await.unwrap();
+
+            match serde_json::from_slice::<Message>(&full_body) {
+                Ok(parsed_message) => {
+                    let state = shared_state.lock().await;
+                    let client_id = &state.1; // Access client_id
+                    let password = &state.2;  // Access password
+                    let dos_address = &state.0; // Access dos_address
+
+                    println!(
+                        "Received image name: {}, views: {}, using client ID: {}, DOS address: {}",
+                        parsed_message.image_name, parsed_message.views, client_id, dos_address
+                    );
+
+                    let mut access_rights = HashMap::new();
+                    access_rights.insert(parsed_message.viewer.to_string(), parsed_message.views as u32); // Example access
+
+                    let client = reqwest::Client::new();
+                    let payload = json!({
+                        "client_id": client_id,
+                        "password": password,
+                        "image_name": parsed_message.image_name,
+                        "access_rights": access_rights
+                    });
+
+                    let response = client
+                        .post(format!("{}/modify_access", dos_address))
+                        .json(&payload)
+                        .send()
+                        .await;
+
+                    match response {
+                        Ok(res) if res.status().is_success() => {
+                            println!("Access rights updated successfully!");
+                            Ok(Response::new(Body::from("Message received and access modified")))
+                        }
+                        Ok(res) => {
+                            eprintln!("Failed to modify access rights: {:?}", res.text().await);
+                            Ok(Response::new(Body::from("Failed to modify access rights")))
+                        }
+                        Err(e) => {
+                            eprintln!("Error communicating with modify_access endpoint: {}", e);
+                            Ok(Response::new(Body::from("Error communicating with server")))
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to parse JSON: {}", e);
+                    Ok(Response::new(Body::from("Invalid JSON format")))
+                }
+            }
+        }
+        _ => {
+            let mut not_found = Response::new(Body::from("Not Found"));
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            Ok(not_found)
+        }
+    }
+}
+
 
 async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     // Determine DOS port based on leader address
@@ -313,10 +498,8 @@ async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn
 
 
 
-
 async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
-    println!("Gallery viewing logic here");
-
+    let client = Client::new();
     loop {
         println!("Choose an option:");
         println!("1: Send a request");
@@ -339,8 +522,13 @@ async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
                 io::stdout().flush()?;
                 io::stdin().read_line(&mut views)?;
                 let views = views.trim().parse::<i32>().unwrap();
-                send_message_to_client(&client_ip, &image_name, views).await?;
+                let mut id = String::new();
+                print!("Enter your client id for confirmation: ");
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut id)?;
+                let id = id.trim().to_string();
 
+                send_message_to_client(&client_ip, &image_name,&id,views).await?;
             },
             "2" => break,
             _ => println!("Invalid choice! Please select again."),
@@ -349,6 +537,49 @@ async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+async fn fetch_client_ip(leader_address: &str) -> Result<String, Box<dyn Error>> {
+    let client = Client::new();
+    let mut client_name = String::new();
+    print!("Enter client name: ");
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut client_name)?;
+    let client_name = client_name.trim().to_string();
+
+    let leader_port: u16 = leader_address.split(':')
+        .nth(1) // Get the port part of the address
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+
+    let dos_port = match leader_port {
+        8080 => Some(8083),
+        8081 => Some(8084),
+        8082 => Some(8085),
+        _ => {
+            eprintln!("Unknown leader port: {}", leader_port);
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Unknown leader port")));
+        }
+    };
+
+    if let Some(port) = dos_port {
+        let dos_address = format!("http://localhost:{}", port);
+        let response = client.get(format!("{}/fetch_clients", dos_address)).send().await?;
+
+        let response_body = response.text().await?;
+        let clients: HashMap<String, String> = from_str(&response_body)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+
+        if let Some(client_ip) = clients.get(&client_name) {
+            Ok(client_ip.clone())
+        } else {
+            Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "No client found with the given name")))
+        }
+    } else {
+        Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Could not determine the DOS port based on the leader address")))
+    }
+}
+
 
 pub async fn register_client_to_dos(leader_address: &str) -> Result<(String, String, String), Box<dyn Error>> {
     let leader_port: u16 = leader_address.split(':')
@@ -394,47 +625,6 @@ pub async fn register_client_to_dos(leader_address: &str) -> Result<(String, Str
     }
 }
 
-async fn fetch_client_ip(leader_address: &str) -> Result<String, Box<dyn Error>> {
-    let client = Client::new();
-    let mut client_name = String::new();
-    print!("Enter client name: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut client_name)?;
-    let client_name = client_name.trim().to_string();
-
-    let leader_port: u16 = leader_address.split(':')
-        .nth(1) // Get the port part of the address
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
-
-    let dos_port = match leader_port {
-        8080 => Some(8083),
-        8081 => Some(8084),
-        8082 => Some(8085),
-        _ => {
-            eprintln!("Unknown leader port: {}", leader_port);
-            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Unknown leader port")));
-        }
-    };
-
-    if let Some(port) = dos_port {
-        let dos_address = format!("http://localhost:{}", port);
-        let response = client.get(format!("{}/fetch_clients", dos_address)).send().await?;
-
-        let response_body = response.text().await?;
-        let clients: HashMap<String, String> = from_str(&response_body)
-            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-
-        if let Some(client_ip) = clients.get(&client_name) {
-            Ok(client_ip.clone())
-        } else {
-            Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "No client found with the given name")))
-        }
-    } else {
-        Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Could not determine the DOS port based on the leader address")))
-    }
-}
 
 pub async fn update_client_ip(
     dos_address: &str,
