@@ -155,7 +155,7 @@ struct Message {
 // }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001)); // Listen on all interfaces
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000)); // Listen on all interfaces
 
     // Shared state for dos_address, client_id, and password
     let shared_state = Arc::new(Mutex::new((String::new(), String::new(), String::new())));
@@ -287,7 +287,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add:&str,views: i32) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
-    let send_msg_url = format!("http://{}:3000/receive_message", client_ip);
+    let send_msg_url = format!("http://{}:3001/receive_message", client_ip);
     
     // Prepare the JSON payload
     let json_payload = json!({
