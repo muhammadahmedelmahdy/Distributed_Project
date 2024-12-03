@@ -30,7 +30,8 @@ use rusttype::Scale;
 use imageproc::drawing::draw_text_mut;
 use image::Rgba;
 use rusttype::Font;
-
+use tokio::net::TcpStream;
+use tokio::net::TcpListener;
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
 const CHUNK_SIZE: usize = 1024;
 const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
@@ -455,25 +456,27 @@ async fn handle_request(
                                 middleware_decrypt(&*socket).await.unwrap();
                             }
                             // Path to the input and output images
-let input_file_path = "encoded_image_received.png";
-let output_file_path = "re_encrypted_image.png";
+                            let input_file_path = "encoded_image_received.png";
+                            let output_file_path = "re_encrypted_image.png";
 
-if let Err(err) = fetch_and_encrypt_image(
-    input_file_path,
-    output_file_path,
-    dos_address,
-    &parsed_message.image_name,
-    client_id,
-    password,
-    &parsed_message.viewer,
-).await {
-    eprintln!("Failed to fetch views or re-encrypt the image: {}", err);
-} else {
-    println!(
-        "Image successfully fetched and re-encrypted with the number of views. Saved to {}.",
-        output_file_path
-    );
-}
+                            if let Err(err) = fetch_and_encrypt_image(
+                                input_file_path,
+                                output_file_path,
+                                dos_address,
+                                &parsed_message.image_name,
+                                client_id,
+                                password,
+                                &parsed_message.viewer,
+                            ).await {
+                                eprintln!("Failed to fetch views or re-encrypt the image: {}", err);
+                            } else {
+                                println!(
+                                    "Image successfully fetched and re-encrypted with the number of views. Saved to {}.",
+                                    output_file_path
+                                );
+                            }
+                            
+
 
                             Ok(Response::new(Body::from("Message received and access modified")))
                         }
@@ -617,74 +620,68 @@ pub async fn get_access_for_viewer(
     }
 }
 pub async fn send_image(
-    socket: &UdpSocket,
+    server_ip: &str,
+    server_port: u16,
     file_path: &str,
-    target_ip: &str,
-    target_port: u16,
 ) -> Result<(), Box<dyn Error>> {
-    let mut file = File::open(file_path).await?;
-    let mut buffer = [0u8; CHUNK_SIZE];
-    let mut chunk_number: u32 = 0;
-    let target_address = format!("{}:{}", target_ip, target_port);
+    // Connect to the server
+    let target_address = format!("{}:{}", server_ip, server_port);
+    let mut stream = TcpStream::connect(&target_address).await?;
+    println!("Connected to server at {}", target_address);
 
-    println!("Starting to send the image to {}", target_address);
+    // Open the file
+    let mut file = File::open(file_path).await?;
+    let mut buffer = [0u8; 1024];
+
+    println!("Starting to send the image...");
 
     while let Ok(bytes_read) = file.read(&mut buffer).await {
         if bytes_read == 0 {
-            break;
+            break; // End of file reached
         }
 
-        let packet = [&chunk_number.to_be_bytes(), &buffer[..bytes_read]].concat();
-        socket.send_to(&packet, &target_address).await?;
-        println!("Sent chunk {}", chunk_number);
-
-        chunk_number += 1;
+        // Send the chunk of data
+        stream.write_all(&buffer[..bytes_read]).await?;
+        println!("Sent {} bytes", bytes_read);
     }
 
     // Send end-of-transmission signal
-    socket.send_to(b"END", &target_address).await?;
-    println!("Image successfully sent to {}", target_address);
+    stream.write_all(b"END").await?;
+    println!("Image transfer complete");
 
     Ok(())
 }
-pub async fn receive_image_and_save(
-    socket: &UdpSocket,
-    output_file_path: &str,
-) -> Result<(), Box<dyn Error>> {
-    let mut file = File::create(output_file_path).await?;
-    let mut buffer = [0u8; CHUNK_SIZE + 4]; // 4 bytes for chunk number
-    let mut expected_chunk_number: u32 = 0;
+pub async fn receive_image_save(server_port: u16, output_file_path: &str) -> Result<(), Box<dyn Error>> {
+    let listener = TcpListener::bind(("0.0.0.0", server_port)).await?;
+    println!("Listening on port {}", server_port);
 
-    println!("Listening for incoming image...");
+    // Accept a connection
+    let (mut socket, _) = listener.accept().await?;
+    println!("Client connected");
+
+    let mut file = File::create(output_file_path).await?;
+    let mut buffer = [0u8; 1024];
 
     loop {
-        let (bytes_received, sender) = socket.recv_from(&mut buffer).await?;
+        let bytes_read = socket.read(&mut buffer).await?;
+        if bytes_read == 0 {
+            break; // Connection closed
+        }
 
-        // Check for end-of-transmission signal
-        if &buffer[..bytes_received] == b"END" {
-            println!("End of transmission received from {}", sender);
+        // Check for the end-of-transmission signal
+        if &buffer[..bytes_read] == b"END" {
+            println!("End of transmission received");
             break;
         }
 
-        // Extract the chunk number and validate it
-        let chunk_number = u32::from_be_bytes(buffer[..4].try_into().unwrap());
-        if chunk_number == expected_chunk_number {
-            file.write_all(&buffer[4..bytes_received]).await?;
-            expected_chunk_number += 1;
-            println!("Received chunk {} from {}", chunk_number, sender);
-        } else {
-            println!(
-                "Unexpected chunk number: expected {}, but received {}",
-                expected_chunk_number, chunk_number
-            );
-        }
+        file.write_all(&buffer[..bytes_read]).await?;
+        println!("Received and wrote {} bytes", bytes_read);
     }
 
-    println!("Image successfully received and saved to {}", output_file_path);
+    println!("Image received and saved to {}", output_file_path);
 
     Ok(())
 }
-
 
 async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     // Determine DOS port based on leader address
