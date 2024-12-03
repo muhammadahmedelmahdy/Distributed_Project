@@ -246,7 +246,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("1: Add an image");
         println!("2: Delete an image");
         println!("3: View the gallery");
-        println!("4: Exit");
+        println!("4: View the latest image");
+        println!("5: Exit");
 
         option.clear(); // Clear the previous input
         std::io::stdin().read_line(&mut option).expect("Failed to read line");
@@ -283,10 +284,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 view_gallery(&leader_address).await?;
             }
-            "4" => break,
+            "4" =>process_image_metadata_and_decode("reply_image.png","final_requested_image.png").await?,
+            "5" => break,
             _ => println!("Invalid choice! Please select again."),
         }
     }
+    
+
+    
+   
 
     Ok(())
 }
@@ -335,18 +341,18 @@ pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to
             eprintln!("Failed to receive reply image: {}", err);
         } else {
             println!("Reply image received successfully and saved to {}", reply_output_path);
-            let output_file_path = "first_decryption.png"; // Path to save the restored image
-            if let Err(err) = strip_metadata(reply_output_path, output_file_path).await {
-                eprintln!("Failed to strip metadata: {}", err);
-            } else {
-                println!("Metadata stripped successfully and saved to {}", output_file_path);
-            }
+            // let output_file_path = "first_decryption.png"; // Path to save the restored image
+            // if let Err(err) = strip_metadata(reply_output_path, output_file_path).await {
+            //     eprintln!("Failed to strip metadata: {}", err);
+            // } else {
+            //     println!("Metadata stripped successfully and saved to {}", output_file_path);
+            // }
         
-            if let Err(err) = decode_image(output_file_path).await {
-                eprintln!("Failed to decode image: {}", err);
-            } else {
-                println!("Image decoded successfully.");
-            }
+            // if let Err(err) = decode_image(output_file_path,"final_requested_image.png").await {
+            //     eprintln!("Failed to decode image: {}", err);
+            // } else {
+            //     println!("Image decoded successfully.");
+            // }
           
         }
     });
@@ -1227,17 +1233,17 @@ async fn receive_ack(socket: &UdpSocket) -> bool {
 /// Receive and decode an image from the server.
 async fn middleware_decrypt(socket: &UdpSocket) -> Result<(), Box<dyn Error>> {
     receive_image(socket).await?;
-    decode_image("encoded_image_received.png").await?;
+    decode_image("encoded_image_received.png","original.png").await?;
     Ok(())
 }
 
 /// Decode the received image and save the decoded output.
-async fn decode_image(file_path: &str) -> Result<(), Box<dyn Error>> {
+async fn decode_image(file_path: &str, output_path: &str) -> Result<(), Box<dyn Error>> {
     let encoded_image = file_as_dynamic_image(file_path.to_string()).to_rgba();
     let decoder = Decoder::new(encoded_image);
 
     let decoded_data = decoder.decode_alpha();
-    let output_path = "decoded_output.png";
+    //let output_path = "decoded_output.png";
     std::fs::write(output_path, &decoded_data)?;
     println!("Image decoded and saved to {}", output_path);
     Ok(())
@@ -1460,7 +1466,7 @@ async fn extract_views_metadata(file_path: &str) -> Result<Option<u32>, Box<dyn 
     println!("No 'Views' metadata found");
     Ok(None)
 }
-async fn strip_metadata(input_file_path: &str, output_file_path: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn strip_metadata(input_file_path: &str, output_file_path: &str) -> Result<(), Box<dyn Error >> {
     // Open the input file asynchronously
     let mut input_file = File::open(input_file_path).await?;
     let mut input_buffer = Vec::new();
@@ -1505,6 +1511,33 @@ async fn strip_metadata(input_file_path: &str, output_file_path: &str) -> Result
     );
     Ok(())
 }
+pub async fn process_image_metadata_and_decode(input_file_path: &str, output_file_path: &str) -> Result<(), Box<dyn Error>> {
+    // Extract metadata
+    if let Some(mut views) = extract_views_metadata(input_file_path).await? {
+        if views > 0 {
+            println!("Image has {} views. Proceeding with processing...", views);
+
+            // Strip metadata
+            let stripped_file_path = "stripped_image.png";
+            strip_metadata(input_file_path, stripped_file_path).await?;
+            println!("Metadata stripped successfully and saved to {}", stripped_file_path);
+
+            // Decode the image
+            decode_image(stripped_file_path, output_file_path).await?;
+            println!("Image decoded successfully and saved to {}", output_file_path);
+            views=views-1;
+            embed_views_metadata(input_file_path, "reply_image.png", views).await?;
+
+        } else {
+            println!("Image has 0 views. Processing not allowed.");
+        }
+    } else {
+        println!("No 'Views' metadata found. Cannot process the image.");
+    }
+
+    Ok(())
+}
+
 pub async fn fetch_composite_image(
     dos_address: &str,
     output_path: &str,
