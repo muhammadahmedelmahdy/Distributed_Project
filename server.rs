@@ -1194,7 +1194,7 @@ async fn send_json_files_to_peers(
     clients_path: &str
 ) -> io::Result<()> {
     loop {
-        if is_leader() {
+        
             println!("This instance is the leader. Sending JSON files to peers...");
 
             // Read directory.json
@@ -1248,9 +1248,7 @@ async fn send_json_files_to_peers(
                     }
                 }
             }
-        } else {
-            println!("This instance is not the leader. Skipping JSON transmission...");
-        }
+        
 
         time::sleep(Duration::from_secs(10)).await;
     }
@@ -1278,8 +1276,8 @@ pub async fn listen_and_save_json(address: &str) -> Result<(), Box<dyn Error + S
                             if let Some(data) = json.get("data").and_then(|v| v.as_str()) {
                                 println!("Received JSON for file: {}", file_name);
 
-                                if let Err(err) = save_json_to_file(file_name, data).await {
-                                    eprintln!("Failed to save JSON to {}: {}", file_name, err);
+                                if let Err(err) = append_json_to_file(file_name, data).await {
+                                    eprintln!("Failed to append JSON to {}: {}", file_name, err);
                                 }
                             } else {
                                 eprintln!("Missing 'data' field in received JSON");
@@ -1304,6 +1302,58 @@ async fn save_json_to_file(filename: &str, content: &str) -> Result<(), Box<dyn 
     println!("Saved JSON to {}", filename);
     Ok(())
 }
+async fn append_json_to_file(filename: &str, new_content: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Step 1: Read the existing file content, if the file exists
+    let mut existing_content = String::new();
+    if let Ok(mut file) = File::open(filename).await {
+        file.read_to_string(&mut existing_content).await?;
+    }
+
+    // Step 2: Parse the existing and new content as JSON values
+    let mut existing_json: Value = serde_json::from_str(&existing_content).unwrap_or_else(|_| json!({}));
+    let new_json: Value = serde_json::from_str(new_content)?;
+
+    // Step 3: Merge the new JSON into the existing JSON with conflict resolution
+    merge_json(&mut existing_json, &new_json);
+
+    // Step 4: Write the updated JSON back to the file
+    let mut file = File::create(filename).await?;
+    file.write_all(existing_json.to_string().as_bytes()).await?;
+    println!("Appended new JSON data to {}", filename);
+
+    Ok(())
+}
+
+fn merge_json(existing_json: &mut Value, new_json: &Value) {
+    match (existing_json, new_json) {
+        // Case 1: Both are objects - merge keys recursively
+        (Value::Object(existing_map), Value::Object(new_map)) => {
+            for (key, new_value) in new_map {
+                match existing_map.get_mut(key) {
+                    Some(existing_value) => {
+                        merge_json(existing_value, new_value); // Recursive merge for nested structures
+                    }
+                    None => {
+                        existing_map.insert(key.clone(), new_value.clone());
+                    }
+                }
+            }
+        }
+        // Case 2: Both are arrays - concatenate unique elements
+        (Value::Array(existing_array), Value::Array(new_array)) => {
+            for new_item in new_array {
+                if !existing_array.contains(new_item) {
+                    existing_array.push(new_item.clone());
+                }
+            }
+        }
+        // Case 3: Conflicting types or simple values - new value overwrites the old
+        (existing_value, new_value) => {
+            *existing_value = new_value.clone();
+        }
+    }
+}
+
 
 
 
