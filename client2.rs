@@ -32,6 +32,7 @@ use image::Rgba;
 use rusttype::Font;
 use tokio::net::TcpStream;
 use tokio::net::TcpListener;
+use png;
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
 const CHUNK_SIZE: usize = 1024;
 const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
@@ -326,7 +327,7 @@ pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to
     });
 
     // Start a listener task for receiving images
-    let reply_port = 6001; // Hardcoded port for receiving the reply
+    let reply_port = 6000; // Hardcoded port for receiving the reply
     let reply_output_path = "reply_image.png"; // Hardcoded output path for the received image
 
     tokio::spawn(async move {
@@ -334,8 +335,23 @@ pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to
             eprintln!("Failed to receive reply image: {}", err);
         } else {
             println!("Reply image received successfully and saved to {}", reply_output_path);
+            let output_file_path = "first_decryption.png"; // Path to save the restored image
+            if let Err(err) = strip_metadata(reply_output_path, output_file_path).await {
+                eprintln!("Failed to strip metadata: {}", err);
+            } else {
+                println!("Metadata stripped successfully and saved to {}", output_file_path);
+            }
+        
+            if let Err(err) = decode_image(output_file_path).await {
+                eprintln!("Failed to decode image: {}", err);
+            } else {
+                println!("Image decoded successfully.");
+            }
+          
         }
     });
+
+    
 
     // Sending the JSON payload as part of the request
     let response = client.post(send_msg_url)
@@ -551,45 +567,45 @@ async fn handle_request(
         }
     }
 }
-async fn encrypt_image_with_views_and_overlay(
-    input_file_path: &str,
-    output_file_path: &str,
-    views: u32,
-) -> Result<(), Box<dyn Error>> {
-    // Load the input image
-    let mut image = image::open(input_file_path)?;
+// async fn encrypt_image_with_views_and_overlay(
+//     input_file_path: &str,
+//     output_file_path: &str,
+//     views: u32,
+// ) -> Result<(), Box<dyn Error>> {
+//     // Load the input image
+//     let mut image = image::open(input_file_path)?;
 
-    // Convert views to a string
-    let views_text = format!("Views: {}", views);
+//     // Convert views to a string
+//     let views_text = format!("Views: {}", views);
 
-    // Load a font (requires a .ttf file in your project directory)
-    let font_data = include_bytes!("/home/muhammadelmahdy/Distributed_Project/Roboto-Bold.ttf") as &[u8]; // Use a font file
-    let font = Font::try_from_bytes(font_data).ok_or("Error loading font")?;
+//     // Load a font (requires a .ttf file in your project directory)
+//     let font_data = include_bytes!("/home/muhammadelmahdy/Distributed_Project/Roboto-Bold.ttf") as &[u8]; // Use a font file
+//     let font = Font::try_from_bytes(font_data).ok_or("Error loading font")?;
 
-    // Set font scale
-    let scale = Scale { x: 30.0, y: 30.0 };
+//     // Set font scale
+//     let scale = Scale { x: 30.0, y: 30.0 };
 
-    // Set position for overlay text
-    let x_position = 10; // Pixels from the left
-    let y_position = 10; // Pixels from the top
+//     // Set position for overlay text
+//     let x_position = 10; // Pixels from the left
+//     let y_position = 10; // Pixels from the top
 
-    // Draw the views text on the image
-    draw_text_mut(
-        &mut image,                  // Target image
-        Rgba([255, 255, 255, 255]), // White color
-        x_position,
-        y_position,
-        scale,
-        &font,
-        &views_text,
-    );
+//     // Draw the views text on the image
+//     draw_text_mut(
+//         &mut image,                  // Target image
+//         Rgba([255, 255, 255, 255]), // White color
+//         x_position,
+//         y_position,
+//         scale,
+//         &font,
+//         &views_text,
+//     );
 
-    // Save the modified image
-    image.save(output_file_path)?;
+//     // Save the modified image
+//     image.save(output_file_path)?;
 
-    println!("Image encrypted with views and saved to {}", output_file_path);
-    Ok(())
-}
+//     println!("Image encrypted with views and saved to {}", output_file_path);
+//     Ok(())
+// }
 async fn fetch_and_encrypt_image(
     input_file_path: &str,
     output_file_path: &str,
@@ -615,7 +631,9 @@ async fn fetch_and_encrypt_image(
     println!("Fetched views: {}", fetched_views);
 
     // Encrypt the image with the fetched views
-    encrypt_image_with_views_and_overlay(input_file_path, output_file_path, fetched_views).await?;
+    //encrypt_image_with_views_and_overlay(input_file_path, output_file_path, fetched_views).await?;
+    embed_views_metadata(input_file_path, output_file_path, fetched_views).await?;
+    // call the new function
     Ok(())
 }
 
@@ -699,7 +717,7 @@ pub async fn send_image(
 
     Ok(())
 }
-pub async fn receive_image_save(server_port: u16, output_file_path: &str) -> Result<(), Box<dyn Error>> {
+pub async fn receive_image_save(server_port: u16, output_file_path: &str) ->Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind(("0.0.0.0", server_port)).await?;
     println!("Listening on port {}", server_port);
 
@@ -1371,7 +1389,122 @@ pub async fn delete_image_from_dos(
         .into())
     }
 }
+async fn embed_views_metadata(input_file_path: &str, output_file_path: &str, views: u32) -> Result<(), Box<dyn Error>> {
+    // Open the input file asynchronously
+    let mut input_file = File::open(input_file_path).await?;
+    let mut input_buffer = Vec::new();
 
+    // Read the entire file into a buffer
+    input_file.read_to_end(&mut input_buffer).await?;
+
+    // Use a Cursor to create a synchronous interface to the buffer
+    let mut cursor = Cursor::new(input_buffer);
+
+    // Decode the PNG
+    let decoder = png::Decoder::new(&mut cursor);
+    let mut reader = decoder.read_info()?;
+    let mut image_buffer = vec![0; reader.output_buffer_size()];
+    reader.next_frame(&mut image_buffer)?;
+
+    // Create a buffer for the output PNG
+    let mut output_buffer = Vec::new();
+    let mut output_cursor = Cursor::new(&mut output_buffer);
+
+    // Create a PNG encoder for the output
+    {
+        let mut encoder = png::Encoder::new(&mut output_cursor, reader.info().width, reader.info().height);
+        encoder.set_color(reader.info().color_type);
+        encoder.set_depth(reader.info().bit_depth);
+
+        // Add metadata (text chunk) for views
+        let views2 = "Views".to_string(); // Convert to String
+        encoder.add_text_chunk(views2, views.to_string())?;
+
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&image_buffer)?;
+    } // Ensure `encoder` and `writer` are dropped here
+
+    // Create the output file asynchronously
+    let mut output_file = File::create(output_file_path).await?;
+    output_file.write_all(output_cursor.get_ref()).await?;
+
+    println!("Embedded {} views in metadata and saved to {}", views, output_file_path);
+    Ok(())
+}
+async fn extract_views_metadata(file_path: &str) -> Result<Option<u32>, Box<dyn Error>> {
+    // Open the file asynchronously
+    let mut input_file = File::open(file_path).await?;
+    let mut input_buffer = Vec::new();
+
+    // Read the entire file into a buffer
+    input_file.read_to_end(&mut input_buffer).await?;
+
+    // Use a Cursor to create a synchronous interface to the buffer
+    let mut cursor = Cursor::new(input_buffer);
+
+    // Decode the PNG
+    let decoder = png::Decoder::new(&mut cursor);
+    let mut reader = decoder.read_info()?;
+
+    // Access the text chunks directly as a Vec
+    for chunk in &reader.info().uncompressed_latin1_text {
+        if chunk.keyword == "Views" {
+            if let Ok(views) = chunk.text.parse::<u32>() {
+                return Ok(Some(views));
+            } else {
+                eprintln!("Failed to parse views from metadata");
+            }
+        }
+    }
+
+    println!("No 'Views' metadata found");
+    Ok(None)
+}
+async fn strip_metadata(input_file_path: &str, output_file_path: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+    // Open the input file asynchronously
+    let mut input_file = File::open(input_file_path).await?;
+    let mut input_buffer = Vec::new();
+
+    // Read the entire file into a buffer
+    input_file.read_to_end(&mut input_buffer).await?;
+
+    // Use a Cursor to create a synchronous interface to the buffer
+    let mut cursor = Cursor::new(input_buffer);
+
+    // Decode the PNG
+    let decoder = png::Decoder::new(&mut cursor);
+    let mut reader = decoder.read_info()?;
+    let mut image_buffer = vec![0; reader.output_buffer_size()];
+    reader.next_frame(&mut image_buffer)?;
+
+    // Create the output file asynchronously
+    let mut output_file = File::create(output_file_path).await?;
+    let mut output_buffer = Vec::new();
+
+    // Use a Cursor to create a synchronous output interface
+    let mut output_cursor = Cursor::new(&mut output_buffer);
+
+    {
+        // Create a PNG encoder for the output
+        let mut encoder = png::Encoder::new(&mut output_cursor, reader.info().width, reader.info().height);
+        encoder.set_color(reader.info().color_type);
+        encoder.set_depth(reader.info().bit_depth);
+
+        // Write the header and image data without adding any metadata
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&image_buffer)?;
+        // Drop the writer and encoder here to release the mutable borrow
+    }
+
+    // Write the output buffer to the async file
+    output_file.write_all(output_cursor.get_ref()).await?;
+
+    println!(
+        "Stripped all metadata and saved the image to {}",
+        output_file_path
+    );
+    Ok(())
+}
 pub async fn fetch_composite_image(
     dos_address: &str,
     output_path: &str,
