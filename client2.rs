@@ -26,6 +26,10 @@ use hyper::{Body, Request, Response, Server, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use rusttype::Scale;
+use imageproc::drawing::draw_text_mut;
+use image::Rgba;
+use rusttype::Font;
 
 const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
 const CHUNK_SIZE: usize = 1024;
@@ -441,17 +445,35 @@ async fn handle_request(
                         Ok(res) if res.status().is_success() => {
                             println!("Access rights updated successfully!");
 
-                            // Encrypt data
                             {
                                 let mut socket = socket.lock().await; // Lock the socket for encryption
-                                middleware_encrypt(&*socket, &leader_address).await.unwrap();
+                                middleware_encrypt(&*socket, &leader_address,&parsed_message.image_name).await.unwrap();
                             }
 
-                            // Decrypt data
                             {
                                 let mut socket = socket.lock().await; // Lock the socket for decryption
                                 middleware_decrypt(&*socket).await.unwrap();
                             }
+                            // Path to the input and output images
+let input_file_path = "encoded_image_received.png";
+let output_file_path = "re_encrypted_image.png";
+
+if let Err(err) = fetch_and_encrypt_image(
+    input_file_path,
+    output_file_path,
+    dos_address,
+    &parsed_message.image_name,
+    client_id,
+    password,
+    &parsed_message.viewer,
+).await {
+    eprintln!("Failed to fetch views or re-encrypt the image: {}", err);
+} else {
+    println!(
+        "Image successfully fetched and re-encrypted with the number of views. Saved to {}.",
+        output_file_path
+    );
+}
 
                             Ok(Response::new(Body::from("Message received and access modified")))
                         }
@@ -476,6 +498,122 @@ async fn handle_request(
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             Ok(not_found)
         }
+    }
+}
+async fn encrypt_image_with_views_and_overlay(
+    input_file_path: &str,
+    output_file_path: &str,
+    views: u32,
+) -> Result<(), Box<dyn Error>> {
+    // Load the input image
+    let mut image = image::open(input_file_path)?;
+
+    // Convert views to a string
+    let views_text = format!("Views: {}", views);
+
+    // Load a font (requires a .ttf file in your project directory)
+    let font_data = include_bytes!("/home/muhammadelmahdy/Distributed_Project/Roboto-Bold.ttf") as &[u8]; // Use a font file
+    let font = Font::try_from_bytes(font_data).ok_or("Error loading font")?;
+
+    // Set font scale
+    let scale = Scale { x: 30.0, y: 30.0 };
+
+    // Set position for overlay text
+    let x_position = 10; // Pixels from the left
+    let y_position = 10; // Pixels from the top
+
+    // Draw the views text on the image
+    draw_text_mut(
+        &mut image,                  // Target image
+        Rgba([255, 255, 255, 255]), // White color
+        x_position,
+        y_position,
+        scale,
+        &font,
+        &views_text,
+    );
+
+    // Save the modified image
+    image.save(output_file_path)?;
+
+    println!("Image encrypted with views and saved to {}", output_file_path);
+    Ok(())
+}
+async fn fetch_and_encrypt_image(
+    input_file_path: &str,
+    output_file_path: &str,
+    server_url: &str,
+    image_name: &str,
+    client_id: &str,
+    password: &str,
+    viewer: &str,
+) -> Result<(), Box<dyn Error>> {
+    // Fetch the number of views from the server
+    let fetched_views = match get_access_for_viewer(server_url, client_id, password, image_name, viewer).await {
+        Ok(Some(views)) => views,
+        Ok(None) => {
+            eprintln!("Viewer does not have access to the image.");
+            return Err("No access found for the viewer".into());
+        }
+        Err(err) => {
+            eprintln!("Error fetching views: {}", err);
+            return Err("Failed to fetch views".into());
+        }
+    };
+
+    println!("Fetched views: {}", fetched_views);
+
+    // Encrypt the image with the fetched views
+    encrypt_image_with_views_and_overlay(input_file_path, output_file_path, fetched_views).await?;
+    Ok(())
+}
+
+
+pub async fn get_access_for_viewer(
+    server_url: &str,
+    client_id: &str,
+    password: &str,
+    image_name: &str,
+    viewer: &str,
+) -> Result<Option<u32>, Box<dyn Error>> {
+    // Create the HTTP client
+    let client = Client::new();
+
+    // Construct the query parameters
+    let mut query_params = HashMap::new();
+    query_params.insert("client_id", client_id.to_string());
+    query_params.insert("password", password.to_string());
+    query_params.insert("image_name", image_name.to_string());
+
+    // Send the GET request with query parameters
+    let response = client
+        .get(format!("{}/get_access", server_url))
+        .query(&query_params)
+        .send()
+        .await?;
+
+    // Check the response status
+    if response.status().is_success() {
+        // Parse the JSON response
+        let response_body: Value = response.json().await?;
+        
+        if let Some(access_rights) = response_body.get("access_rights") {
+            if let Some(viewer_access) = access_rights.get(viewer) {
+                if let Some(views) = viewer_access.as_u64() {
+                    return Ok(Some(views as u32));
+                }
+            }
+        }
+
+        Ok(None) // Viewer does not have access
+    } else {
+        // Handle error responses
+        let error_message: Value = response.json().await?;
+        Err(format!(
+            "Failed to retrieve access rights: {}",
+            error_message
+        )
+        .into())
     }
 }
 
@@ -913,8 +1051,8 @@ async fn request_leader(socket: &UdpSocket) -> Result<String, Box<dyn Error>> {
     }
 }
 
-async fn middleware_encrypt(socket: &UdpSocket, leader_addr: &str) -> tokio::io::Result<()> {
-    let image_path = "image2.jpg"; // Path to the image file
+async fn middleware_encrypt(socket: &UdpSocket, leader_addr: &str,image_path: &str) -> tokio::io::Result<()> {
+    
     let mut file = File::open(image_path).await?;
     let mut buffer = [0u8; CHUNK_SIZE];
     let mut chunk_number: u32 = 0;
@@ -997,7 +1135,7 @@ async fn receive_image(socket: &UdpSocket) -> tokio::io::Result<()> {
             expected_chunk_number += 1;
 
             socket.send_to(ACK, addr).await?;
-            println!("Client: Acknowledged chunk {}", chunk_number);
+            //println!("Client: Acknowledged chunk {}", chunk_number);
         } else {
             println!("Client: Unexpected chunk number. Expected {}, but received {}.", expected_chunk_number, chunk_number);
         }
