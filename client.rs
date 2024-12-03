@@ -33,7 +33,8 @@ use rusttype::Font;
 use tokio::net::TcpStream;
 use tokio::net::TcpListener;
 use png;
-const SERVER_ADDRS: [&str; 3] = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"];
+use std::process::Command;
+const SERVER_ADDRS: [&str; 3] = ["10.7.17.88:8080", "10.7.17.50:8081", "10.7.17.155:8082"];
 const CHUNK_SIZE: usize = 1024;
 const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 const ACK: &[u8] = b"ACK";
@@ -159,6 +160,37 @@ struct Message {
 
 //     Ok(())
 // }
+
+async fn add_notification(
+    api_base_url: &str,
+    image_owner: &str,
+    image_name: &str,
+    requester: &str,
+    access_rights: i32,
+) -> Result<(), Box<dyn Error>> {
+    let client = Client::new();
+    let response = client
+        .post(format!("{}/add_notification", api_base_url))
+        .json(&json!({
+            "image_owner": image_owner,
+            "image_name": image_name,
+            "requester": requester,
+            "access_rights": access_rights,
+        }))
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        println!("Notification added successfully.");
+    } else {
+        eprintln!(
+            "Failed to add notification: {:?}",
+            response.text().await?
+        );
+    }
+
+    Ok(())
+}
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 3000)); // Listen on all interfaces
@@ -247,7 +279,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("2: Delete an image");
         println!("3: View the gallery");
         println!("4: View the latest image");
-        println!("5: Exit");
+        println!("5: View Past notifications");
+        println!("6: Exit");
 
         option.clear(); // Clear the previous input
         std::io::stdin().read_line(&mut option).expect("Failed to read line");
@@ -285,7 +318,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 view_gallery(&leader_address).await?;
             }
             "4" =>process_image_metadata_and_decode("reply_image.png","final_requested_image.png").await?,
-            "5" => break,
+            "5" => { let state = shared_state.lock().await;
+                list_notifications_with_choice_and_execute(&state.0, &state.1, &state.2, &state.0).await?},
+            "6" => break,
             _ => println!("Invalid choice! Please select again."),
         }
     }
@@ -321,9 +356,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 //     }
 //     Ok(())
 // }
-pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add: &str, views: i32) -> Result<(), Box<dyn Error>> {
+pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add: &str, views: i32,client_name:&str,dos_address: &str) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
-    let send_msg_url = format!("http://{}:3001/receive_message", client_ip);
+    let send_msg_url = format!("http://{}:3000/receive_message", client_ip);
     
     // Prepare the JSON payload
     let json_payload = json!({
@@ -357,6 +392,7 @@ pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to
         }
     });
 
+    add_notification(dos_address,client_name,image_name,client_to_add,views).await?;
     
 
     // Sending the JSON payload as part of the request
@@ -365,10 +401,13 @@ pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to
                          .send()
                          .await?;
 
+    
+
     if response.status().is_success() {
         println!("Message sent successfully!");
     } else {
         eprintln!("Failed to send message: {}", response.status());
+        
     }
 
     Ok(())
@@ -463,6 +502,104 @@ pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to
 //         }
 //     }
 // }
+
+async fn list_notifications_with_choice_and_execute(
+    api_base_url: &str,
+    client_id: &str,
+    password: &str,
+    dos_address: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Call the `get_notifications` function to fetch notifications
+    let client = Client::new();
+    let response = client
+        .get(format!("{}/get_notifications", api_base_url))
+        .query(&[("client_id", client_id)])
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        // Parse the JSON response
+        let notifications: Value = response.json().await?;
+
+        // Check if notifications exist
+        if let Some(notifications_map) = notifications.as_object() {
+            let mut notification_list = Vec::new();
+            println!("Notifications for client {}:", client_id);
+
+            let mut counter = 1;
+            for (requester, notifications_list) in notifications_map {
+                if let Some(list) = notifications_list.as_array() {
+                    for notification in list {
+                        if let (Some(image), Some(access_rights)) = (
+                            notification.get("image").and_then(|v| v.as_str()),
+                            notification.get("access_rights").and_then(|v| v.as_u64()),
+                        ) {
+                            println!(
+                                "{}. Requester: {}, Image: {}, Access Rights: {}",
+                                counter, requester, image, access_rights
+                            );
+                            notification_list.push((requester.clone(), image.to_string(), access_rights as u32));
+                            counter += 1;
+                        }
+                    }
+                }
+            }
+
+            // Prompt user to choose a notification
+            println!("Enter the number of the notification to handle:");
+            let mut choice = String::new();
+            io::stdout().flush()?;
+            io::stdin().read_line(&mut choice)?;
+            let choice: usize = choice.trim().parse().unwrap_or(0);
+
+            // Check if choice is valid
+            if choice > 0 && choice <= notification_list.len() {
+                let (requester, image_name, access_rights) = &notification_list[choice - 1];
+
+                // Perform logic for the selected notification
+                let mut access_rights_map = HashMap::new();
+                access_rights_map.insert(requester.clone(), *access_rights);
+
+                let payload = json!({
+                    "client_id": client_id,
+                    "password": password,
+                    "image_name": image_name,
+                    "access_rights": access_rights_map
+                });
+
+                let modify_access_response = client
+                    .post(format!("{}/modify_access", dos_address))
+                    .json(&payload)
+                    .send()
+                    .await;
+
+                match modify_access_response {
+                    Ok(res) if res.status().is_success() => {
+                        println!("Access rights updated successfully for image: {}", image_name);
+                    }
+                    Ok(res) => {
+                        eprintln!("Failed to modify access rights: {:?}", res.text().await);
+                    }
+                    Err(err) => {
+                        eprintln!("Error communicating with modify_access endpoint: {}", err);
+                    }
+                }
+            } else {
+                println!("Invalid choice!");
+            }
+        } else {
+            println!("No notifications found.");
+        }
+    } else {
+        eprintln!(
+            "Failed to get notifications: {:?}",
+            response.text().await?
+        );
+    }
+
+    Ok(())
+}
+
 async fn handle_request(
     req: Request<Body>,
     shared_state: Arc<Mutex<(String, String, String)>>, // Shared state
@@ -487,7 +624,16 @@ async fn handle_request(
 
                     let mut access_rights = HashMap::new();
                     access_rights.insert(parsed_message.viewer.to_string(), parsed_message.views as u32); // Example access
-
+                    let client_ip = match resolve_client_ip(&leader_address, &parsed_message.viewer).await {
+                        Ok(ip) => ip,
+                        Err(err) => {
+                            eprintln!("Failed to resolve client IP: {}", err);
+                            return Ok(Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from("Failed to resolve client IP"))
+                                .unwrap());
+                        }
+                    };
                     let client = reqwest::Client::new();
                     let payload = json!({
                         "client_id": client_id,
@@ -536,10 +682,10 @@ async fn handle_request(
                                 );
                             }
                             // Send the image to the client
-                            let client_ip = "127.0.0.1"; // Replace with actual client IP
-                            let client_port = 6001;      // Replace with the client's port
+                            
+                            let client_port = 6000;      // Replace with the client's port
 
-                            if let Err(err) = send_image(client_ip, client_port, output_file_path).await {
+                            if let Err(err) = send_image(&client_ip, client_port, output_file_path).await {
                                 eprintln!("Failed to send image to client: {}", err);
                                 return Ok(Response::new(Body::from("Error during image sending")));
                             } else {
@@ -612,6 +758,70 @@ async fn handle_request(
 //     println!("Image encrypted with views and saved to {}", output_file_path);
 //     Ok(())
 // }
+async fn resolve_client_ip(leader_address: &str, client_name: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // Create an HTTP client
+    let client = reqwest::Client::new();
+
+    // Parse the leader address
+    let parts: Vec<&str> = leader_address.split(':').collect();
+    let leader_host = parts.get(0).unwrap_or(&"");
+    let leader_port: u16 = parts.get(1).unwrap_or(&"0").parse().unwrap_or(0);
+
+    println!("Host: {}, Port: {}", leader_host, leader_port);
+
+    // Map the leader port to the corresponding DOS port
+    let dos_port = match leader_port {
+        8080 => Some(8083),
+        8081 => Some(8084),
+        8082 => Some(8085),
+        _ => {
+            eprintln!("Unknown leader port: {}", leader_port);
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Unknown leader port: {}", leader_port),
+            )));
+        }
+    };
+
+    if let Some(port) = dos_port {
+        let dos_address = format!("http://{}:{}", leader_host, port);
+        println!("DOS Address: {}", dos_address);
+
+        // Fetch clients from the DOS server
+        let response = client.get(format!("{}/fetch_clients", dos_address)).send().await?;
+
+        if response.status().is_success() {
+            let response_body = response.text().await?;
+            let clients: HashMap<String, String> = serde_json::from_str(&response_body)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            // Retrieve the IP address for the specified client name
+            if let Some(client_ip) = clients.get(client_name) {
+                Ok(client_ip.clone())
+            } else {
+                Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("No client found with the given name: {}", client_name),
+                )))
+            }
+        } else {
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "Failed to fetch clients: {}",
+                    response.text().await.unwrap_or_else(|_| "No response body".to_string())
+                ),
+            )))
+        }
+    } else {
+        Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Could not determine the DOS port based on the leader address",
+        )))
+    }
+}
+
+
 async fn fetch_and_encrypt_image(
     input_file_path: &str,
     output_file_path: &str,
@@ -723,6 +933,28 @@ pub async fn send_image(
 
     Ok(())
 }
+
+async fn get_notifications(api_base_url: &str, client_id: &str) -> Result<(), Box<dyn Error>> {
+    let client = Client::new();
+    let response = client
+        .get(format!("{}/get_notifications", api_base_url))
+        .query(&[("client_id", client_id)])
+        .send()
+        .await?;
+
+    if response.status().is_success() {
+        let notifications: serde_json::Value = response.json().await?;
+        println!("Notifications for client {}: {:?}", client_id, notifications);
+    } else {
+        eprintln!(
+            "Failed to get notifications: {:?}",
+            response.text().await?
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn receive_image_save(server_port: u16, output_file_path: &str) ->Result<(), Box<dyn Error + Send + Sync>> {
     let listener = TcpListener::bind(("0.0.0.0", server_port)).await?;
     println!("Listening on port {}", server_port);
@@ -757,11 +989,14 @@ pub async fn receive_image_save(server_port: u16, output_file_path: &str) ->Resu
 
 async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     // Determine DOS port based on leader address
-    let leader_port: u16 = leader_address.split(':')
-        .nth(1) // Get the port part of the address
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
+    let parts: Vec<&str> = leader_address.split(':').collect();
+    let leader_host = parts.get(0).unwrap_or(&"");
+    let leader_port: u16 = parts.get(1)
+    .unwrap_or(&"0")
+    .parse()
+    .unwrap_or(0);
+
+    println!("Host: {}, Port: {}", leader_host, leader_port);
 
     let dos_port = match leader_port {
         8080 => Some(8083),
@@ -775,7 +1010,7 @@ async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn
 
     if let Some(port) = dos_port {
         let client = Client::new();
-        let dos_address = format!("http://localhost:{}", port);
+        let dos_address = format!("http://{}:{}",leader_host, port);
 
         let login_endpoint = format!("{}/login", dos_address);
 
@@ -873,6 +1108,30 @@ async fn login(leader_address: &str) -> Result<(String, String, String), Box<dyn
 
 async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
+    let parts: Vec<&str> = leader_address.split(':').collect();
+    let leader_host = parts.get(0).unwrap_or(&"");
+    let leader_port: u16 = parts.get(1)
+    .unwrap_or(&"0")
+    .parse()
+    .unwrap_or(0);
+
+    println!("Host: {}, Port: {}", leader_host, leader_port);
+
+    let dos_port = match leader_port {
+        8080 => Some(8083),
+        8081 => Some(8084),
+        8082 => Some(8085),
+        _ => {
+            eprintln!("Unknown leader port: {}", leader_port);
+            None
+        }
+    };
+    let dos_address = format!(
+        "http://{}:{}",
+        leader_host,
+        dos_port.unwrap_or(8080) // Provide a default port if dos_port is None
+    );
+    
     loop {
         println!("Choose an option:");
         println!("1: Send a request");
@@ -883,7 +1142,12 @@ async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
 
         match gallery_choice.trim() {
             "1" => {
-                let client_ip = fetch_client_ip(leader_address).await?;
+                 let mut client_name = String::new();
+                print!("Enter client name: ");
+                io::stdout().flush()?;
+                io::stdin().read_line(&mut client_name)?;
+                let client_name = client_name.trim().to_string();
+                let client_ip = fetch_client_ip(leader_address,&client_name).await?;
                 let mut image_name = String::new();
                 print!("Enter image name: ");
                 io::stdout().flush()?;
@@ -901,7 +1165,7 @@ async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
                 io::stdin().read_line(&mut id)?;
                 let id = id.trim().to_string();
 
-                send_message_to_client(&client_ip, &image_name,&id,views).await?;
+                send_message_to_client(&client_ip, &image_name,&id,views,&client_name,&dos_address).await?;
             },
             "2" => break,
             _ => println!("Invalid choice! Please select again."),
@@ -911,19 +1175,23 @@ async fn view_gallery(leader_address: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn fetch_client_ip(leader_address: &str) -> Result<String, Box<dyn Error>> {
+async fn fetch_client_ip(leader_address: &str,client_name:&str) -> Result<String, Box<dyn Error>> {
     let client = Client::new();
-    let mut client_name = String::new();
-    print!("Enter client name: ");
-    io::stdout().flush()?;
-    io::stdin().read_line(&mut client_name)?;
-    let client_name = client_name.trim().to_string();
+   
+    // Determine DOS port based on leader address
+    let parts: Vec<&str> = leader_address.split(':').collect();
+    let leader_host = parts.get(0).unwrap_or(&"");
+    let leader_port: u16 = parts.get(1)
+    .unwrap_or(&"0")
+    .parse()
+    .unwrap_or(0);
 
-    let leader_port: u16 = leader_address.split(':')
-        .nth(1) // Get the port part of the address
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
+    println!("Host: {}, Port: {}", leader_host, leader_port);
+    // let leader_port: u16 = leader_address.split(':')
+    //     .nth(1) // Get the port part of the address
+    //     .unwrap_or("0")
+    //     .parse()
+    //     .unwrap_or(0);
 
     let dos_port = match leader_port {
         8080 => Some(8083),
@@ -936,14 +1204,14 @@ async fn fetch_client_ip(leader_address: &str) -> Result<String, Box<dyn Error>>
     };
 
     if let Some(port) = dos_port {
-        let dos_address = format!("http://localhost:{}", port);
+        let dos_address = format!("http://{}:{}",leader_host, port);
         let response = client.get(format!("{}/fetch_clients", dos_address)).send().await?;
 
         let response_body = response.text().await?;
         let clients: HashMap<String, String> = from_str(&response_body)
             .map_err(|e| Box::new(e) as Box<dyn Error>)?;
 
-        if let Some(client_ip) = clients.get(&client_name) {
+        if let Some(client_ip) = clients.get(client_name) {
             Ok(client_ip.clone())
         } else {
             Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "No client found with the given name")))
@@ -955,11 +1223,20 @@ async fn fetch_client_ip(leader_address: &str) -> Result<String, Box<dyn Error>>
 
 
 pub async fn register_client_to_dos(leader_address: &str) -> Result<(String, String, String), Box<dyn Error>> {
-    let leader_port: u16 = leader_address.split(':')
-        .nth(1)
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
+    // Determine DOS port based on leader address
+    let parts: Vec<&str> = leader_address.split(':').collect();
+    let leader_host = parts.get(0).unwrap_or(&"");
+    let leader_port: u16 = parts.get(1)
+    .unwrap_or(&"0")
+    .parse()
+    .unwrap_or(0);
+
+    println!("Host: {}, Port: {}", leader_host, leader_port);
+    // let leader_port: u16 = leader_address.split(':')
+    //     .nth(1)
+    //     .unwrap_or("0")
+    //     .parse()
+    //     .unwrap_or(0);
 
     if let Some(port) = match leader_port {
         8080 => Some(8083),
@@ -970,7 +1247,7 @@ pub async fn register_client_to_dos(leader_address: &str) -> Result<(String, Str
             None
         }
     } {
-        let dos_address = format!("http://localhost:{}", port);
+        let dos_address = format!("http://{}:{}",leader_host, port);
         println!("DOS Address determined: {}", dos_address);
 
         let mut client_id = String::new();
@@ -1527,6 +1804,7 @@ pub async fn process_image_metadata_and_decode(input_file_path: &str, output_fil
             println!("Image decoded successfully and saved to {}", output_file_path);
             views=views-1;
             embed_views_metadata(input_file_path, "reply_image.png", views).await?;
+            
 
         } else {
             println!("Image has 0 views. Processing not allowed.");
