@@ -39,11 +39,52 @@ use tokio::net::TcpStream;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncBufReadExt, BufReader as OtherBufReader};
 use serde_json::Value;
-
+use reqwest::Client;
 use tokio::time;
 const CHUNK_SIZE: usize = 1024;
 const ACK: &[u8] = b"ACK";
 static IS_LEADER: AtomicBool = AtomicBool::new(false);
+#[derive(Serialize, Deserialize, Clone)]
+struct Notification {
+    image_owner: String,
+    image_name: String,
+    requester: String,
+    access_rights: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct NotificationDirectory {
+    notifications: HashMap<String, Vec<Notification>>, // Keyed by client ID
+}
+
+impl NotificationDirectory {
+    fn new() -> Self {
+        NotificationDirectory {
+            notifications: HashMap::new(),
+        }
+    }
+
+    fn load_from_file(file_path: &str) -> Self {
+        let file = match std::fs::File::open(file_path) {
+            Ok(file) => file,
+            Err(_) => std::fs::File::create(file_path).unwrap(),
+        };
+
+        let reader = BufReader::new(file);
+        serde_json::from_reader(reader).unwrap_or_else(|_| NotificationDirectory::new())
+    }
+
+    fn save_to_file(&self, file_path: &str) {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(file_path)
+            .unwrap();
+        let writer = BufWriter::new(file);
+        serde_json::to_writer(writer, &self).unwrap();
+    }
+}
 #[derive(Serialize, Deserialize, Clone)]
 struct Directory {
     clients: HashMap<String, Vec<String>>,
@@ -208,10 +249,10 @@ fn create_composite_image(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
-    let own_address = "127.0.0.1:8080";
-    let peer_addresses = vec!["127.0.0.1:8081", "127.0.0.1:8082"];
+    let own_address = "10.7.17.50:8081";
+    let peer_addresses = vec!["10.7.17.88:8080", "10.7.17.155:8082"];
     let socket = Arc::new(UdpSocket::bind(own_address).await?);
-    let jsons_addresses = vec!["127.0.0.1:5001", "127.0.0.1:5002"];
+    let jsons_addresses = vec!["10.7.17.88:5000", "10.7.17.155:5002"];
     //  Directory::new().save_to_file("directory.json");
     // ClientDirectory::new().save_to_file("clients.json");
 
@@ -225,7 +266,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let server_task = tokio::spawn(leader_election(socket_clone, peer_addresses));
 
     // Define addresses for the JSON listener
-    let listener_addresses = "127.0.0.1:5050";
+    let listener_addresses = "10.7.17.50:5001";
 
     // Spawn the listener task
     let listener_task = task::spawn(async move {
@@ -235,8 +276,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     });
 
     // DOS Server Task
-    let ip = [127, 0, 0, 1];
-    let port = 8083;
+    let ip = [10, 7, 17, 50];
+    let port = 8084;
     let dos_task = run_dos(ip, port).await;
 
     // Sender Task (periodically sends JSON files to peers)
@@ -264,6 +305,9 @@ pub async fn run_dos(ip: [u8; 4], port: u16) -> tokio::task::JoinHandle<()> {
     let clients_file_path = "clients.json";
     let directory: SharedDirectory = Arc::new(Mutex::new(Directory::load_from_file(file_path)));
     let client_directory: SharedClientDirectory = Arc::new(Mutex::new(ClientDirectory::load_from_file(clients_file_path)));
+    let notifications_file_path = "notifications.json";
+    let notification_directory: Arc<Mutex<NotificationDirectory>> =
+        Arc::new(Mutex::new(NotificationDirectory::load_from_file(notifications_file_path)));
     // Directory::new().save_to_file("directory.json");
     // ClientDirectory::new().save_to_file("clients.json");
 
@@ -840,6 +884,91 @@ let update_ip = warp::path("update_ip")
         }))
     });
 
+    let add_notification = warp::path("add_notification")
+    .and(warp::post())
+    .and(warp::body::json())
+    .map(|body: HashMap<String, serde_json::Value>| {
+        // Dynamically load the notification directory
+        let notifications_file_path = "notifications.json";
+        let mut notification_directory = NotificationDirectory::load_from_file(notifications_file_path);
+
+        // Extract required fields
+        let image_owner = body
+            .get("image_owner")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let image_name = body
+            .get("image_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let requester = body
+            .get("requester")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let access_rights = body
+            .get("access_rights")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        // Create a new notification
+        let notification = Notification {
+            image_owner: image_owner.to_string(),
+            image_name: image_name.to_string(),
+            requester: requester.to_string(),
+            access_rights,
+        };
+
+        // Add the notification to the directory
+        notification_directory
+            .notifications
+            .entry(image_owner.to_string())
+            .or_insert_with(Vec::new)
+            .push(notification);
+
+        // Save the updated directory back to the file
+        notification_directory.save_to_file(notifications_file_path);
+
+        warp::reply::json(&json!({ "message": "Notification added successfully" }))
+    });
+    let get_notifications = warp::path("get_notifications")
+    .and(warp::get())
+    .and(warp::query::<HashMap<String, String>>())
+    .map(|query: HashMap<String, String>| {
+        // Dynamically load the notification directory
+        let notifications_file_path = "notifications.json";
+        let notification_directory = NotificationDirectory::load_from_file(notifications_file_path);
+
+        // Create a persistent binding for the default value
+        let default_client_id = String::new();
+        let client_id = query.get("client_id").unwrap_or(&default_client_id);
+
+        // Retrieve notifications for the client
+        if let Some(notifications) = notification_directory.notifications.get(client_id) {
+            let result: HashMap<String, Vec<serde_json::Value>> = notifications
+                .iter()
+                .group_by(|n| n.requester.clone())
+                .into_iter()
+                .map(|(requester, group)| {
+                    let data = group
+                        .map(|n| {
+                            json!({
+                                "image": n.image_name,
+                                "access_rights": n.access_rights,
+                            })
+                        })
+                        .collect();
+                    (requester, data)
+                })
+                .collect();
+
+            warp::reply::json(&result)
+        } else {
+            warp::reply::json(&json!({ "error": "No notifications found" }))
+        }
+    });
+
+
+
 
 
 
@@ -857,6 +986,8 @@ let update_ip = warp::path("update_ip")
         .or(edit_views)
         .or(remove_access)
         .or(get_access)
+        .or(get_notifications)
+        .or(add_notification)
         .or(login);
 
     tokio::spawn(async move {
@@ -1241,8 +1372,23 @@ async fn save_json_to_file(filename: &str, content: &str) -> Result<(), Box<dyn 
 //     }
 // }
 
+const API_BASE_URL: &str = "http://127.0.0.1:3030";
+const LOCAL_SAVE_PATH: &str = "temp_received.json";
+/// Downloads files using the `receive-file` endpoint
+async fn download_files(client: &Client) -> Result<(), Box<dyn Error>> {
+    let response = client
+        .post(format!("{}/receive-file", API_BASE_URL))
+        .json(&json!({ "save_path": LOCAL_SAVE_PATH }))
+        .send()
+        .await?;
 
-
+    if response.status().is_success() {
+        println!("Files downloaded successfully.");
+    } else {
+        eprintln!("Failed to download files: {:?}", response.text().await?);
+    }
+    Ok(())
+}
 async fn send_encoded_image(socket: Arc<UdpSocket>, dest: std::net::SocketAddr) -> tokio::io::Result<()> {
     let encoded_image_path = "encrypted_image_1.png";
     let mut file = File::open(encoded_image_path).await?;
