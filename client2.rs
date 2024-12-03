@@ -290,7 +290,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add:&str,views: i32) -> Result<(), Box<dyn Error>> {
+// async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add:&str,views: i32) -> Result<(), Box<dyn Error>> {
+//     let client = Client::new();
+//     let send_msg_url = format!("http://{}:3001/receive_message", client_ip);
+    
+//     // Prepare the JSON payload
+//     let json_payload = json!({
+//         "image_name": image_name,
+//         "views": views,
+//         "viewer": client_to_add
+//     });
+
+//     // Sending the JSON payload as part of the request
+//     let response = client.post(send_msg_url)
+//                          .json(&json_payload)  // Use the json method to send JSON data
+//                          .send()
+//                          .await?;
+
+//     if response.status().is_success() {
+//         println!("Message sent successfully!");
+//     } else {
+//         eprintln!("Failed to send message: {}", response.status());
+//     }
+//     Ok(())
+// }
+pub async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add: &str, views: i32) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
     let send_msg_url = format!("http://{}:3000/receive_message", client_ip);
     
@@ -299,6 +323,18 @@ async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add
         "image_name": image_name,
         "views": views,
         "viewer": client_to_add
+    });
+
+    // Start a listener task for receiving images
+    let reply_port = 6001; // Hardcoded port for receiving the reply
+    let reply_output_path = "reply_image.png"; // Hardcoded output path for the received image
+
+    tokio::spawn(async move {
+        if let Err(err) = receive_image_save(reply_port, reply_output_path).await {
+            eprintln!("Failed to receive reply image: {}", err);
+        } else {
+            println!("Reply image received successfully and saved to {}", reply_output_path);
+        }
     });
 
     // Sending the JSON payload as part of the request
@@ -312,8 +348,10 @@ async fn send_message_to_client(client_ip: &str, image_name: &str, client_to_add
     } else {
         eprintln!("Failed to send message: {}", response.status());
     }
+
     Ok(())
 }
+
 
 // async fn handle_request(req: Request<Body>) -> Result<Response<Body>, Infallible> {
 //     match (req.method(), req.uri().path()) {
@@ -475,7 +513,17 @@ async fn handle_request(
                                     output_file_path
                                 );
                             }
-                            
+                            // Send the image to the client
+                            let client_ip = "127.0.0.1"; // Replace with actual client IP
+                            let client_port = 6000;      // Replace with the client's port
+
+                            if let Err(err) = send_image(client_ip, client_port, output_file_path).await {
+                                eprintln!("Failed to send image to client: {}", err);
+                                return Ok(Response::new(Body::from("Error during image sending")));
+                            } else {
+                                println!("Image sent successfully to the client.");
+                            }
+
 
 
                             Ok(Response::new(Body::from("Message received and access modified")))
