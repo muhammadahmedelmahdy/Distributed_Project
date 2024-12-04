@@ -1804,7 +1804,29 @@ pub async fn process_image_metadata_and_decode(input_file_path: &str, output_fil
             println!("Image decoded successfully and saved to {}", output_file_path);
             views=views-1;
             embed_views_metadata(input_file_path, "reply_image.png", views).await?;
-            
+            if cfg!(target_os = "windows") {
+                Command::new("cmd")
+                    .arg("/C")
+                    .arg(format!("start {}", output_file_path))
+                    .spawn()
+                    .expect("Failed to open image");
+            }
+            // MacOS uses 'open'
+            else if cfg!(target_os = "macos") {
+                Command::new("open")
+                    .arg(output_file_path)
+                    .spawn()
+                    .expect("Failed to open image");
+            }
+            // Linux typically uses 'xdg-open' or feh
+            else if cfg!(target_os = "linux") {
+                Command::new("xdg-open")
+                    .arg(output_file_path)
+                    .spawn()
+                    .expect("Failed to open image");
+            } else {
+                eprintln!("Unsupported platform for image viewer");
+            }
 
         } else {
             println!("Image has 0 views. Processing not allowed.");
