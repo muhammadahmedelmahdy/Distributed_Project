@@ -13,7 +13,7 @@ them to view all the images uploaded by other users
 which enables them to see the images in low resolution
 so that he can later request the image from this client or
 user.
-- Image Encryption & Decryption: We provide a
+- Image Encryption & Decryption: We provided a
 steganography functionality which allows the image to
 be encrypted at the server side and only decrypted at
 the recpient client side. Details of implementing this are
