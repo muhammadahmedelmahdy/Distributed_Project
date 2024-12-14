@@ -1,4 +1,4 @@
-# A Cloud P2P Environment for Controlled Sharingof Images
+# A Cloud P2P Environment for Controlled Sharing of Images
 ### Features:
 - Login & Registration: Users can login or register with
 their user ID and password. These credentials are then
