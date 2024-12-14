@@ -34,7 +34,19 @@ being offline, he can view the notifications of the requests
 he missed and then decides to approve or reject them
 accordingly.
 
-### III. Performance
+### Performance
+
+### Table I: Performance results without load balancing.
+
+| Clients   | Time taken for a request (sec) | Time taken for 1000 requests (hr) |
+|-----------|--------------------------------|------------------------------------|
+| Client 1  | 7.41                           | 1.75                               |
+| Client 2  | 8.03                           | 1.90                               |
+| Client 3  | 7.74                           | 1.71                               |
+
+---
+
+### Table II: Performance results with load balancing.
 
 | Clients   | Time taken for a request (sec) | Time taken for 1000 requests (hr) |
 |-----------|--------------------------------|------------------------------------|
